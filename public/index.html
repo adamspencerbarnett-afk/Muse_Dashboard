@@ -1,0 +1,277 @@
+<!doctype html>
+<!--
+  Muse Dashboard · public/index.html
+  Author: Adam S. Barnett
+
+  The single page of the dashboard: sidebar, chat header, conversation,
+  Activity panel, composer, Settings and the dialogs. public/app.js fills it
+  in; every id used there must exist here (checked by test/dom-ids.mjs).
+  Scripts and styles load from the dashboard itself only (strict CSP).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Muse Dashboard</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/vendor/hljs.css">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/vendor/marked.js"></script>
+  <script src="/vendor/purify.js"></script>
+  <script src="/vendor/highlight.js"></script>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="side-top">
+        <button id="newChatBtn" class="new-chat" title="Start a new conversation (Ctrl+Shift+O)">
+          <span class="plus">+</span> New chat
+        </button>
+        <input id="searchBox" class="search" type="search" placeholder="Search chats" autocomplete="off">
+      </div>
+      <nav id="chatList" class="chat-list" aria-label="Conversations"></nav>
+      <div class="side-bottom">
+        <div id="usageBox" class="usage-box" title="Muse reports subscription usage as replies run; nothing reported yet.">
+          <div class="usage-row"><span>5-hour</span><div class="usage-bar"><i id="usage5hBar"></i></div><b id="usage5h">–</b></div>
+          <div class="usage-row"><span>Weekly</span><div class="usage-bar"><i id="usageWkBar"></i></div><b id="usageWk">–</b></div>
+          <div id="usageApi" class="usage-api hidden">API key · billed per use</div>
+        </div>
+        <button id="settingsBtn" class="settings-btn" title="Defaults and system settings (everything not already on the main page)"><span class="gear">&#9881;</span> Settings</button>
+      </div>
+    </aside>
+
+    <main id="main">
+      <header id="chatHeader" class="chat-header">
+        <button id="sidebarToggle" class="icon-btn" title="Toggle sidebar">☰</button>
+        <div class="title-wrap">
+          <h1 id="chatTitle" title="Click to rename" tabindex="0">New chat</h1>
+          <button id="folderChip" class="folder-chip" title="Folder Muse works in for this chat"></button>
+          <button id="trustChip" class="trust-chip hidden">⚠ Untrusted folder: no project rules or subagents · Trust…</button>
+        </div>
+        <div class="header-actions">
+          <span id="runState" class="run-state"></span>
+          <select id="modelSelect" class="hdr-select" title="Model for this chat. Applies to the next reply; you can change it any time."></select>
+          <select id="effortSelect" class="hdr-select effort-select" title="Reasoning effort (difficulty) for this chat, from Minimal to Ultra. Higher tiers think longer and use more tokens. Applies from the next reply, and is remembered for this chat.">
+            <option value="minimal">Minimal</option>
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+            <option value="xhigh">Extra high</option>
+            <option value="max">Max</option>
+            <option value="ultra">Ultra</option>
+          </select>
+          <select id="approvalSelect" class="hdr-select" title="How Muse asks before it runs commands or edits files in this chat">
+            <option value="allowAll">Approve all</option>
+            <option value="onRequest">Ask me</option>
+          </select>
+          <select id="agentSelect" class="hdr-select" title="Subagents for this chat. Solo: Muse works alone (cheapest). Auto: Muse decides (it usually works alone). Parallel: Muse splits independent parts across helper agents on Spark. Measured on a 2-minute four-part task it was not faster and cost about 3x, so keep it for long jobs with big independent parts. Applies from the next message.">
+            <option value="solo">Agents: Solo</option>
+            <option value="auto">Agents: Auto</option>
+            <option value="parallel">Agents: Parallel</option>
+          </select>
+          <button id="activityToggle" class="ghost-btn activity-toggle" title="Show or hide the Activity panel. Tool calls, edits and to-dos for this chat live there instead of in the conversation.">Activity <span id="activityCount" class="count-badge"></span></button>
+          <span id="ctxMeter" class="ctx-meter"></span>
+          <button id="compactBtn" class="ghost-btn" title="Compact this chat's context now (Muse also compacts by itself near the limit)">Compact</button>
+          <button id="connectBtn" class="connect-btn hidden" title="Muse Code is not ready. Click to connect it.">⚠ Connect Muse</button>
+          <button id="museBadge" class="muse-badge" title="Muse version">
+            <span id="museDot" class="mdot"></span><span id="museText">Muse</span>
+          </button>
+        </div>
+      </header>
+      <div id="musePanel" class="muse-panel hidden" role="dialog" aria-label="Muse version">
+        <div id="musePanelBody"></div>
+        <div class="muse-panel-actions">
+          <button id="museCheckBtn" class="ghost-btn">Check for updates now</button>
+        </div>
+      </div>
+
+      <div id="settingsBackdrop" class="settings-backdrop hidden"></div>
+      <div id="settingsPanel" class="settings-panel hidden" role="dialog" aria-modal="true" aria-label="Settings">
+        <div class="settings-head">
+          <h3>Settings</h3>
+          <button id="settingsCloseBtn" class="icon-btn" title="Close settings (Esc)" aria-label="Close settings">×</button>
+        </div>
+        <p class="settings-sub">Only the things you can't do from the main page live here. Model, effort and approvals for the open chat are in the header bar above the conversation. Rename, hide and delete are in each chat's ⋯ menu in the sidebar, and Muse version and updates are behind the Muse badge in the header.</p>
+        <h4>Connection</h4>
+        <div class="settings-row">
+          <label for="connectOpenBtn">Muse Code<span id="connectInfo" class="hint">Checking…</span></label>
+          <button id="connectOpenBtn" class="ghost-btn">Connection…</button>
+        </div>
+        <div class="settings-row">
+          <label for="connMode">How Muse connects<span id="connHint" class="hint"></span></label>
+          <select id="connMode" class="hdr-select">
+            <option value="subscription">Muse Code subscription</option>
+            <option value="apiKey">API key (pay per use)</option>
+            <option value="env">META_API_KEY (environment)</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <label for="apiKeyBtn">API key<span id="apiKeyHint" class="hint">No key saved.</span></label>
+          <span class="row-btns"><button id="apiKeyRemoveBtn" class="ghost-btn hidden">Remove</button><button id="apiKeyBtn" class="ghost-btn">Add key…</button></span>
+        </div>
+        <h4>Chat list</h4>
+        <div class="settings-row">
+          <label for="showHidden">Show hidden chats<span class="hint">Chats you hid from a chat's ⋯ menu stay out of the sidebar until you turn this on.</span></label>
+          <input type="checkbox" id="showHidden">
+        </div>
+        <div class="settings-row">
+          <label for="showOther">Show chats from outside this dashboard<span class="hint">Muse keeps one session list for your whole account. The sidebar shows only chats made here or working in this dashboard's Projects folder; turn this on to also see chats from the terminal or another copy of the dashboard. Continuing one here adds it to this dashboard.</span></label>
+          <input type="checkbox" id="showOther">
+        </div>
+        <h4>New chats</h4>
+        <div class="settings-row">
+          <label for="defEffortSelect">Starting effort<span class="hint">Only the starting point for a brand-new chat. Change the open chat's effort in the header bar instead.</span></label>
+          <select id="defEffortSelect" class="hdr-select effort-select">
+            <option value="minimal">Minimal</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="xhigh">Extra high</option>
+            <option value="max">Max</option>
+            <option value="ultra">Ultra</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <label for="defApprovalSelect">Starting approvals<span class="hint">Only the starting point for a brand-new chat. Change the open chat's approvals in the header bar instead.</span></label>
+          <select id="defApprovalSelect" class="hdr-select">
+            <option value="allowAll">Approve all</option>
+            <option value="onRequest">Ask me</option>
+          </select>
+        </div>
+        <h4>System</h4>
+        <div id="envInfo" class="env-info"></div>
+        <div class="settings-row">
+          <label for="restartBtn">Restart dashboard<span class="hint">Restarts the dashboard and Muse and reloads this page (picks up code and config changes). Not available while a reply is running.</span></label>
+          <button id="restartBtn" class="ghost-btn">Restart</button>
+        </div>
+        <p class="settings-note">Muse version and update checks live behind the Muse badge in the header bar.</p>
+      </div>
+
+      <div class="workarea">
+        <section id="messages" class="messages" aria-live="polite"></section>
+        <aside id="activityPanel" class="activity-panel" aria-label="Activity">
+          <div class="activity-head"><span>Activity</span><button id="activityClose" class="icon-btn" title="Hide the Activity panel">×</button></div>
+          <div id="activityList" class="activity-list"></div>
+        </aside>
+      </div>
+
+      <footer id="composerWrap" class="composer-wrap">
+        <div id="attachments" class="attachments"></div>
+        <div class="composer">
+          <button id="attachBtn" class="icon-btn" title="Attach files">📎</button>
+          <input id="fileInput" type="file" multiple hidden>
+          <textarea id="input" rows="1" placeholder="Message Muse… (Enter to send, Shift+Enter for a new line)"></textarea>
+          <button id="sendBtn" class="send-btn" title="Send">➤</button>
+          <button id="stopBtn" class="stop-btn hidden" title="Stop the current reply">■</button>
+        </div>
+      </footer>
+    </main>
+  </div>
+  <div id="dropOverlay" class="drop-overlay hidden"><div>Drop files to attach<small>They are saved in this chat's attachments folder</small></div></div>
+
+  <div id="folderModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="folderModalTitle">
+    <div class="modal-card">
+      <h3 id="folderModalTitle">Work in an existing project folder?</h3>
+      <p class="modal-sub">Optional. By default every chat gets its own new folder. Pick a project folder here if you want Muse to work on existing code.</p>
+      <div class="path-row">
+        <input id="pathInput" type="text" placeholder="Paste or type a full folder path, e.g. C:\Users\you\Games\my-game" spellcheck="false">
+        <button id="pathGo" class="ghost-btn">Open</button>
+      </div>
+      <div id="modalRecents" class="recents"></div>
+      <div class="browser">
+        <div class="browser-bar">
+          <button id="upBtn" class="ghost-btn" title="Parent folder">↑ Up</button>
+          <button id="rootsBtn" class="ghost-btn" title="Drives and shortcuts">Drives</button>
+          <span id="browserPath" class="browser-path"></span>
+        </div>
+        <div id="browserList" class="browser-list"></div>
+      </div>
+      <label class="toggle small"><input type="checkbox" id="showDotDirs"> Show hidden folders</label>
+      <div class="modal-actions">
+        <span id="modalError" class="error-text"></span>
+        <button id="nativePickBtn" class="ghost-btn hidden">Windows folder dialog…</button>
+        <button id="autoFolderBtn" class="ghost-btn">Use the chat's own folder</button>
+        <button id="modalCancel" class="ghost-btn">Cancel</button>
+        <button id="modalOk" class="primary-btn" disabled>Use this folder</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="titleModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="titleModalHeading">
+    <div class="modal-card title-card">
+      <h3 id="titleModalHeading">New chat</h3>
+      <div class="choice-tabs" role="tablist">
+        <button id="choiceNew" class="choice-tab active" role="tab" aria-selected="true">New project</button>
+        <button id="choiceOpen" class="choice-tab" role="tab" aria-selected="false">Open folder…</button>
+      </div>
+      <p id="titleModalSub" class="modal-sub"></p>
+      <div id="openFolderPane" class="open-pane hidden">
+        <div class="open-row">
+          <div id="openFolderPath" class="open-path">No folder chosen yet</div>
+          <button id="openBrowseBtn" class="ghost-btn">Browse…</button>
+        </div>
+        <div id="openRecents" class="recents"></div>
+        <label id="seedRow" class="toggle small hidden"><input type="checkbox" id="seedStarter"> <span id="seedLabel"></span></label>
+        <label id="snapRow" class="toggle small hidden"><input type="checkbox" id="snapFirst" checked> <span id="snapLabel"></span></label>
+        <div id="openFolderNote" class="open-note"></div>
+      </div>
+      <input id="projectTitleField" class="title-field" type="text" maxlength="120" placeholder="e.g. Kitchen redesign" aria-label="Chat title" autocomplete="off" autocapitalize="off" spellcheck="false" data-form-type="other" data-lpignore="true">
+      <div id="projectFolderPreview" class="folder-preview"></div>
+      <div class="modal-actions">
+        <span id="titleError" class="error-text"></span>
+        <button id="titleCancel" class="ghost-btn">Cancel</button>
+        <button id="titleCreate" class="primary-btn">Create chat</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="confirmModal" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmText">
+    <div class="modal-card title-card">
+      <h3 id="confirmTitle"></h3>
+      <p id="confirmText" class="confirm-text"></p>
+      <div class="modal-actions">
+        <button id="confirmNo" class="ghost-btn">No</button>
+        <button id="confirmYes" class="primary-btn">Yes</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="connectModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="connectTitle" aria-describedby="connectText">
+    <div class="modal-card title-card">
+      <h3 id="connectTitle">Connect to Muse Code</h3>
+      <p id="connectText" class="confirm-text"></p>
+      <pre id="connectCmd" class="connect-cmd hidden"></pre>
+      <div class="modal-actions">
+        <span id="connectStatus" class="error-text"></span>
+        <button id="connectCopy" class="ghost-btn hidden">Copy command</button>
+        <button id="connectLater" class="ghost-btn">Later</button>
+        <button id="connectCheck" class="ghost-btn">Check again</button>
+        <button id="connectUseSub" class="ghost-btn hidden">Use subscription</button>
+        <button id="connectApiKey" class="ghost-btn hidden">Use an API key</button>
+        <button id="connectSignIn" class="primary-btn hidden">Sign in with Meta</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="apiKeyModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="apiKeyTitle">
+    <div class="modal-card title-card">
+      <h3 id="apiKeyTitle">Use a Meta API key</h3>
+      <p class="modal-sub">Muse then runs on this key instead of a Muse Code subscription, billed per use by Meta. Create a key at <a href="https://dev.meta.ai" target="_blank" rel="noopener noreferrer">dev.meta.ai</a>. The dashboard checks it with Meta (free), keeps it encrypted for your user account only, and never shows it again. A subscription sign-in stays as it is, so you can switch back any time.</p>
+      <div class="path-row">
+        <input id="apiKeyInput" type="text" class="masked" placeholder="Paste your API key" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="API key">
+        <button id="apiKeyShow" class="ghost-btn" type="button" aria-pressed="false">Show</button>
+      </div>
+      <div class="modal-actions">
+        <span id="apiKeyError" class="error-text" role="alert"></span>
+        <button id="apiKeyCancel" class="ghost-btn">Cancel</button>
+        <button id="apiKeyAnyway" class="ghost-btn hidden">Save without checking</button>
+        <button id="apiKeySave" class="primary-btn">Check &amp; save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts"></div>
+  <div id="stoppedBanner" class="stopped-banner hidden" role="alert"><span class="msg">Dashboard stopped. Start it again to continue.</span></div>
+  <script src="/app.js"></script>
+</body>
+</html>

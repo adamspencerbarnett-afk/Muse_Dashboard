@@ -1,0 +1,14 @@
+# Installed by npm (start-dashboard runs `npm ci` on first start)
+node_modules/
+
+# Local, per-computer state: never commit these
+config.json
+data/
+.dashboard-url
+Projects/*
+!Projects/.gitkeep
+
+# Test and tool leftovers
+.mock-muse-state.json*
+.tmp-*/
+*.log
