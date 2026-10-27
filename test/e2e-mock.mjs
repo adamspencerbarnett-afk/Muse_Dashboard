@@ -264,6 +264,13 @@ ok(!!agBurn && agBurn.data.input < 1500000, "spending stopped soon after the lim
 // ---- model / effort / approval-mode ----
 const ml = await (await fetch(base + `api/models?sessionId=${chat.id}`, { headers: H })).json();
 ok(ml.models.some((m) => m.modelId === "mock-big") && ml.models.find((m) => m.modelId === "mock-model")?.isActive, "model/list flags the active model");
+// A model the connection does not offer (like a subscription-only model on an API key) is refused up front.
+r = await fetch(base + `api/chats/${chat.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ modelId: "mock-gone" }) });
+ok(r.status === 409 && /mock-gone is not available .*mock-model, mock-big/.test((await r.json()).error), "picking a model the connection does not offer is refused, naming the ones it does");
+const goneDraft = await (await fetch(base + "api/chats", { method: "POST", headers: H, body: JSON.stringify({ title: "Gone model", modelId: "mock-gone" }) })).json();
+r = await fetch(base + `api/chats/${goneDraft.id}/messages`, { method: "POST", headers: H, body: JSON.stringify({ text: "hi" }) });
+ok(r.status === 409 && /not available/.test((await r.json()).error), "a chat whose saved model is no longer offered gets a clear error instead of a failed reply");
+await fetch(base + `api/chats/${goneDraft.id}?folder=recycle`, { method: "DELETE", headers: H });
 r = await fetch(base + `api/chats/${chat.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ modelId: "mock-big", reasoningEffort: "low", approvalMode: "allowAll" }) });
 ok(r.status === 200, "model/effort/approval PATCH accepted");
 const afterSet = mockState()[chat.id];

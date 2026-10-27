@@ -1382,7 +1382,11 @@
       if (prevState === "checking" && u.state === "updated") toast(`Muse was updated to ${u.to || "the latest version"}.`);
     });
     // A new sign-in or connection is announced where it happens; only an update needs saying here.
-    es.addEventListener("muse-restarted", (ev) => { if (JSON.parse(ev.data || "{}").reason === "update") toast("Restarted Muse to use the new version."); });
+    es.addEventListener("muse-restarted", (ev) => {
+      const reason = JSON.parse(ev.data || "{}").reason;
+      if (reason === "update") toast("Restarted Muse to use the new version.");
+      if (reason === "connection") void reloadModels(); // the restarted host lists the new connection's models
+    });
     es.addEventListener("connection", (ev) => setConnection(JSON.parse(ev.data)));
     es.onerror = () => {
       // EventSource retries by itself; check once whether the server is still there.
@@ -1951,8 +1955,11 @@
 
   // Settings → Connection and the API-key popup. Every change answers with the connection after a fresh check.
   /** `before`: the state before the change. A solved problem is already announced as "Connected …" (by this answer or the live event ahead of it). */
+  /** The models depend on the connection (an API key offers a different set than the subscription). */
+  const reloadModels = () => loadModels(state.current && !state.current.draft ? state.current.id : undefined);
   function connectionChanged(c, what, before) {
     setConnection(c);
+    void reloadModels();
     const solved = PROBLEM_STATES.has(before) && c.state === "connected";
     const msg = solved ? what : `${what ? `${what} ` : ""}Muse now connects through ${VIA[c.via].label}${c.switchesAfterReply ? " once the current reply ends" : ""}.`;
     if (msg) toast(msg);
@@ -2079,10 +2086,16 @@
     if (ms) {
       // Only this chat's own model (or the host default) — never another chat's last-used model.
       const cur = c.model || (state.env && state.env.muse && state.env.muse.host && state.env.muse.host.model) || "";
+      for (const o of [...ms.options]) if (o.dataset.unavailable) o.remove();
       if (!state.models.length && cur && !ms.options.length) {
         const o = document.createElement("option");
         o.value = cur; o.textContent = cur;
         ms.appendChild(o);
+      } else if (cur && state.models.length && !state.models.some((m) => m.modelId === cur)) {
+        // This chat's model is not offered by the current connection (e.g. a subscription-only model on an API key).
+        const o = document.createElement("option");
+        o.value = cur; o.textContent = `${cur} (not available on this connection)`; o.dataset.unavailable = "1";
+        ms.prepend(o);
       }
       if (cur) ms.value = cur;
     }

@@ -332,6 +332,18 @@ try {
 let connection = { state: "checking" };
 let connectionCheck = null;
 /** The connection as the page sees it: the check's state plus how Muse connects (the key's last 4 characters only). */
+/**
+ * Refuse a model the current connection does not offer (a subscription-only model on an API key, say):
+ * Meta would fail every reply with "does not exist or you lack access". Muse's own list is the truth.
+ */
+async function assertModelOffered(modelId) {
+  if (!modelId) return;
+  let models;
+  try { models = (await muse.listModels()).models; } catch { return; } // Muse not up yet: it answers for itself
+  if (!models.length || models.some((m) => m.modelId === modelId)) return;
+  const via = connectionVia() === "subscription" ? "your Muse Code subscription" : connectionVia() === "apiKey" ? "this API key" : "META_API_KEY";
+  throw httpError(409, `${modelId} is not available with ${via}. Pick another model in the header: ${models.map((m) => m.modelId).join(", ")}.`);
+}
 function connectionView() {
   return { ...connection, via: connectionVia(), apiKey: apiKeys.saved, envKey: !!ENV_API_KEY, notice: keyNotice };
 }
@@ -1005,6 +1017,7 @@ async function handleApi(req, res, url) {
       if (typeof body.title === "string") patch.title = body.title.trim().slice(0, 120) || undefined;
       if (typeof body.hidden === "boolean") patch.hidden = body.hidden;
       if (typeof body.modelId === "string" && body.modelId.trim()) patch.modelId = body.modelId.trim().slice(0, 200);
+      await assertModelOffered(patch.modelId);
       if ("reasoningEffort" in body) {
         if (body.reasoningEffort === null || body.reasoningEffort === "") patch.reasoningEffort = undefined;
         else if (REASONING_EFFORTS.includes(body.reasoningEffort)) patch.reasoningEffort = body.reasoningEffort;
@@ -1132,6 +1145,7 @@ async function handleApi(req, res, url) {
     }
     if (method === "POST" && sub === "messages") {
       const body = await readJsonBody(req);
+      await assertModelOffered(store.chat(id)?.modelId || (draft ? config.model : muse.sessionInfo(id)?.modelId));
       const text = typeof body.text === "string" ? body.text : "";
       const images = Array.isArray(body.images) ? body.images : [];
       const rawPaths = (Array.isArray(body.paths) ? body.paths : []).slice(0, 100).map(String);
