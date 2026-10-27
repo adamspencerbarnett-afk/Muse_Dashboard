@@ -331,7 +331,6 @@ try {
 // States: checking | connected | signedOut | keyRefused | notInstalled | hostError | unknown.
 let connection = { state: "checking" };
 let connectionCheck = null;
-/** The connection as the page sees it: the check's state plus how Muse connects (the key's last 4 characters only). */
 /**
  * Refuse a model the current connection does not offer (a subscription-only model on an API key, say):
  * Meta would fail every reply with "does not exist or you lack access". Muse's own list is the truth.
@@ -344,6 +343,7 @@ async function assertModelOffered(modelId) {
   const via = connectionVia() === "subscription" ? "your Muse Code subscription" : connectionVia() === "apiKey" ? "this API key" : "META_API_KEY";
   throw httpError(409, `${modelId} is not available with ${via}. Pick another model in the header: ${models.map((m) => m.modelId).join(", ")}.`);
 }
+/** The connection as the page sees it: the check's state plus how Muse connects (the key's last 4 characters only). */
 function connectionView() {
   return { ...connection, via: connectionVia(), apiKey: apiKeys.saved, envKey: !!ENV_API_KEY, notice: keyNotice };
 }

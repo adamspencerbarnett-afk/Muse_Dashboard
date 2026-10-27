@@ -1954,9 +1954,9 @@
   }
 
   // Settings → Connection and the API-key popup. Every change answers with the connection after a fresh check.
-  /** `before`: the state before the change. A solved problem is already announced as "Connected …" (by this answer or the live event ahead of it). */
   /** The models depend on the connection (an API key offers a different set than the subscription). */
   const reloadModels = () => loadModels(state.current && !state.current.draft ? state.current.id : undefined);
+  /** `before`: the state before the change. A solved problem is already announced as "Connected …" (by this answer or the live event ahead of it). */
   function connectionChanged(c, what, before) {
     setConnection(c);
     void reloadModels();
