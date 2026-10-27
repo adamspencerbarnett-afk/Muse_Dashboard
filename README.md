@@ -10,6 +10,8 @@ Meta's official [`@muse-code/sdk`](https://github.com/meta-models/muse-code-sdk)
 the same sign-in and the same session history as Muse in your terminal, so chats started
 in either place show up in both.
 
+![Muse Dashboard: chat list, a new chat, and the Activity panel](docs/images/dashboard.png)
+
 Created by **Adam S. Barnett**.
 
 ---
@@ -151,6 +153,8 @@ To use a specific Muse binary instead, set `museBin` in `config.json` to its ful
 Muse can run on your **Muse Code subscription** (the Meta account sign-in, with its 5-hour and
 weekly allowance) or on a **Meta API key** (billed per use by Meta). Choose in
 **Settings → Connection → How Muse connects**:
+
+![Settings → Connection: the How Muse connects dropdown switches between API key (pay per use) and Muse Code subscription](docs/images/settings-connection.png)
 
 - **Add an API key:** **Add key…** (or **Use an API key** in the Connect dialog). Paste a key
   from [dev.meta.ai](https://dev.meta.ai) and click **Check & save**: the dashboard asks Meta
@@ -510,6 +514,7 @@ Muse_Dashboard_v1/
 ├── scripts/install-skills.mjs  Installs those skills into Muse (npm run install-skills)
 ├── mock/                     A fake Muse for the tests (no Muse or sign-in needed)
 ├── test/                     Self-contained tests (npm test)
+├── docs/images/              Screenshots used in this README
 └── Projects/                 Your chats' project folders (not committed)
 ```
 
