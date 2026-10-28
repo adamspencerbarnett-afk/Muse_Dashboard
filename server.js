@@ -21,8 +21,10 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Store } from "./lib/store.js";
-import { MuseHosts, REASONING_EFFORTS, APPROVAL_MODES } from "./lib/muse.js";
+import { MuseHosts, REASONING_EFFORTS, APPROVAL_MODES, IF_BUSY } from "./lib/muse.js";
 import { AGENT_MODES, agentDirective, agentTotals, workspaceTrust, trustFolder } from "./lib/agents.js";
+import { cronSummary } from "./lib/cron.js";
+import { folderKey, normalizePrices, estimate, mergePrices, sumEntries } from "./lib/spend.js";
 import { folderGit, saveSnapshot, restoreSnapshot } from "./lib/snapshot.js";
 import { githubLinksInText, githubAccounts, findClone, cloneRepo, excludeStarterFiles, githubRules } from "./lib/github.js";
 import { ApiKeyStore, checkApiKey, looksLikeApiKey, CONNECTION_MODES, DEFAULT_META_API_BASE } from "./lib/api-key.js";
@@ -75,6 +77,8 @@ const config = {
   agentTokenWarn: 1500000, // tell the user when one reply's subagents have read this many input tokens (0 = never)
   agentTokenLimit: 4000000, // stop a reply's subagents and workflows past this many input tokens (0 = no limit)
   agentStallMinutes: 10, // tell the user when a working subagent has shown no progress this long (0 = never); it may be stuck in a command
+  cronRunWarn: 10, // tell the user once when one scheduled job (Muse's cron tools) has run this many times (0 = never)
+  musePreset: "miniswe", // `muse serve --preset <name>` for the host (null = Muse's default preset); the Settings switch overrides this
   museSettings: null, // Muse settings passed to `muse serve` as `-c key=<json>` (e.g. "context_compaction.provider_context_limit_tokens": 256000)
   sharedHost: true, // one `muse serve` for all chats (each session has its own workspace root)
   projectsDir: null, // where per-chat project folders are created (default: <dashboard>/Projects)
@@ -175,13 +179,19 @@ if (!samePath(store.data.projectsDir, PROJECTS_DIR)) {
   store.data.projectsDir = PROJECTS_DIR;
   void store.save();
 }
+// The Settings switch for the Muse preset outlives config.json's default.
+if (store.data.settings.musePreset !== undefined) config.musePreset = store.data.settings.musePreset;
 const sseClients = new Set();
 function emit(type, payload) {
   if (type === "muse" && payload?.method === "turn/completed" && payload.sessionId) onTurnCompleted(payload.sessionId, payload.params);
   if (type === "turn-stats") checkStepBudget(payload);
   if (type === "agent-stats") checkAgentBudget(payload);
+  if (type === "muse" && payload?.method === "session/tokenUsage" && payload.params?.turnId) recordStep(payload.sessionId, payload.params);
+  if (type === "agent-usage") recordAgentUsage(payload);
   if (type === "host-status") {
     onHostStatus(payload);
+    // A fresh host reports catalog prices only once Meta's catalog has arrived: look again shortly after it is ready.
+    if (payload?.state === "ready") setTimeout(() => listModelsRemember().catch(() => undefined), 15000).unref();
     return void emitMuseStatus(); // fold into the full version/update status
   }
   const data = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
@@ -203,6 +213,44 @@ function onTurnCompleted(sessionId, params) {
     store.upsertChat(sessionId, { tokenUsage: u });
     emit("chat-usage", { id: sessionId, tokenUsage: u, agentUsage: agentTotals(meta.agentItems) });
   }
+}
+// Token spend per project folder (lib/spend.js): every model step of a
+// dashboard chat, under the connection it ran on. Priced at display time from
+// Meta's catalog and the user's table; only API-key use becomes dollars.
+function recordStep(sessionId, p) {
+  const meta = store.chat(sessionId);
+  if (!meta?.workspace) return;
+  const u = p.usage || {};
+  const input = Number(p.promptTokens ?? u.inputTokens) || 0, cached = Number(u.cacheReadTokens ?? u.cachedTokens) || 0, output = Number(u.outputTokens) || 0;
+  recordSpend(meta.workspace, p.modelId || meta.modelId || "unknown", [Math.max(0, input - cached), cached, output]);
+}
+function recordAgentUsage({ sessionId, modelId, input, cached, output }) {
+  const meta = store.chat(sessionId);
+  if (!meta?.workspace) return;
+  recordSpend(meta.workspace, modelId || config.agentHelperModel || "unknown", [Math.max(0, (Number(input) || 0) - (Number(cached) || 0)), cached, output]);
+}
+function recordSpend(workspace, modelId, tokens) {
+  const mode = connectionVia() === "subscription" ? "sub" : "api";
+  if (store.addSpend(workspace, mode, modelId, tokens)) emit("spend", { key: folderKey(workspace), cost: costOf(workspace), totals: spendTotals() });
+}
+/** Dollar figures are shown only on an API key with estimates on: the subscription is a flat fee, so nothing is priced there. */
+const estimatesShown = () => store.data.prices.enabled && connectionVia() !== "subscription";
+/** The estimate over every project folder for the sidebar box (API-key use only becomes dollars), or null while none are shown. */
+function spendTotals() {
+  if (!estimatesShown()) return null;
+  return estimate(sumEntries(Object.values(store.data.spend)), mergePrices(store.data.prices.models, store.data.catalog.models));
+}
+/** The folder's dollar estimate for the page, or null while none are shown or nothing is recorded. Typed prices win; Meta's catalog fills the rest. */
+function costOf(workspace) {
+  if (!workspace || !estimatesShown()) return null;
+  const entry = store.spendOf(workspace);
+  return entry ? estimate(entry, mergePrices(store.data.prices.models, store.data.catalog.models)) : null;
+}
+/** model/list, remembering any catalog prices it carries (they arrive a little after a host starts, so a later read may add them). */
+async function listModelsRemember(active) {
+  const r = await muse.listModels(active);
+  if (store.rememberCatalog(r.models)) emit("prices-changed", { enabled: store.data.prices.enabled });
+  return r;
 }
 // Every model step re-sends the whole context, so a runaway reply is the
 // costliest failure: warn at turnStepWarn steps, stop at turnStepLimit.
@@ -317,6 +365,7 @@ async function useConnection(key) {
   const via = connectionVia();
   museKey = via === "apiKey" ? key || (await apiKeys.read()) : via === "env" ? ENV_API_KEY : null;
   muse.setMetaApiKey(museKey);
+  emit("prices-changed", { enabled: store.data.prices.enabled }); // dollar figures follow the connection
 }
 try {
   await useConnection();
@@ -721,16 +770,20 @@ async function listChats(includeHidden, includeOther) {
       hidden: !!meta?.hidden,
       fromTerminal: !meta,
       createdByClient: s.createdByClient?.name,
+      cron: cronSummary(meta?.cronJobs),
+      queued: muse.queuedTurns(s.sessionId).length,
     });
   }
   // Drafts, and chats we know about that Muse did not list (e.g. Muse unreachable).
   for (const meta of Object.values(store.data.chats)) {
     if (meta.deleted || seen.has(meta.id) || (meta.hidden && !includeHidden)) continue;
-    out.push({ id: meta.id, title: meta.title || "New chat", workspace: meta.workspace, updatedAt: meta.createdAt, hidden: !!meta.hidden, draft: !!meta.draft, autoFolder: !!meta.autoFolder, unlisted: !meta.draft, tokenUsage: meta.tokenUsage || null, agentUsage: meta.agentItems ? agentTotals(meta.agentItems) : null });
+    out.push({ id: meta.id, title: meta.title || "New chat", workspace: meta.workspace, updatedAt: meta.createdAt, hidden: !!meta.hidden, draft: !!meta.draft, autoFolder: !!meta.autoFolder, unlisted: !meta.draft, tokenUsage: meta.tokenUsage || null, agentUsage: meta.agentItems ? agentTotals(meta.agentItems) : null, cron: cronSummary(meta.cronJobs) });
   }
   for (const c of out) {
     if (!c.draft) c.autoFolder = !!store.chat(c.id)?.autoFolder;
     c.snapshotAt = store.chat(c.id)?.snapshot?.at || null;
+    c.folderKey = c.workspace ? folderKey(c.workspace) : null;
+    c.folderCost = costOf(c.workspace);
     c.inProjects = !!c.workspace && isWithinDir(PROJECTS_DIR, c.workspace); // only these folders can be deleted (to the Recycle Bin)
   }
   out.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
@@ -838,6 +891,7 @@ async function handleApi(req, res, url) {
       sandboxUnavailableReason: muse.status.sandboxUnavailableReason || null,
       trustWorkspace: !!config.trustWorkspace,
       agentMode: agentModeOf(null),
+      musePreset: config.musePreset || null,
     });
   }
   if (route === "GET /muse/status") return sendJson(res, 200, museStatus());
@@ -906,9 +960,35 @@ async function handleApi(req, res, url) {
   if (route === "GET /models") {
     const sid = url.searchParams.get("sessionId");
     const active = sid ? store.chat(sid)?.modelId || muse.sessionInfo(sid)?.modelId : undefined;
-    return sendJson(res, 200, await muse.listModels(active));
+    return sendJson(res, 200, await listModelsRemember(active));
   }
   if (route === "GET /usage") return sendJson(res, 200, { usage: await muse.subscriptionUsage() });
+  if (route === "GET /spend") return sendJson(res, 200, { totals: spendTotals(), enabled: store.data.prices.enabled });
+  // Muse preset switch (miniswe on/off): applies to the next Muse host, which starts once nothing is running.
+  if (route === "POST /settings/preset") {
+    const body = await readJsonBody(req);
+    const preset = body.miniswe ? "miniswe" : null;
+    if ((config.musePreset || null) !== preset) {
+      config.musePreset = preset;
+      store.setSetting("musePreset", preset);
+      muse.restartWhenIdle("preset");
+    }
+    return sendJson(res, 200, { musePreset: config.musePreset || null, restartPending: muse.busy() });
+  }
+  // Cost estimates: the user's price table (USD per 1M tokens) and the models to price (offered now, or seen in a folder's record).
+  if (route === "GET /prices") {
+    let offered = [];
+    try { offered = (await listModelsRemember()).models.map((m) => m.modelId); } catch { /* no host yet: the models already seen are listed */ }
+    return sendJson(res, 200, { ...store.data.prices, catalog: [...new Set([...offered, ...store.spentModels(), ...Object.keys(store.data.prices.models)])], catalogPrices: store.data.catalog.models, catalogAt: store.data.catalog.at });
+  }
+  if (route === "POST /prices") {
+    const body = await readJsonBody(req);
+    let next;
+    try { next = normalizePrices({ ...body, touch: true }); } catch (e) { throw httpError(400, e.message); }
+    store.setPrices(next);
+    emit("prices-changed", { enabled: next.enabled });
+    return sendJson(res, 200, store.data.prices);
+  }
   if (route === "POST /restart") {
     if (!SUPERVISED) throw httpError(409, "Restart works when the dashboard was started with start-dashboard.bat (or start-dashboard.sh). Stop it and start it that way.");
     if (muse.busy()) throw httpError(409, "A reply is still running or waiting for approval. Let it finish (or press Stop), then restart.");
@@ -996,6 +1076,10 @@ async function handleApi(req, res, url) {
         approvalMode: meta?.approvalMode || config.approvalMode,
         agentMode: agentModeOf(meta),
         agentsActive: live.agentsActive,
+        queued: live.queued,
+        cronJobs: muse.cronJobs(id),
+        folderKey: workspace ? folderKey(workspace) : null,
+        folderCost: costOf(workspace),
         trust: trustOf(workspace),
         tokenUsage: h.tokenUsage || null,
         contextUsage: h.contextUsage || null,
@@ -1081,7 +1165,7 @@ async function handleApi(req, res, url) {
       // Put the folder back the way it was at the chat's snapshot (see lib/snapshot.js).
       const meta = store.chat(id);
       if (!meta?.snapshot) throw httpError(409, "This chat has no snapshot.");
-      if (muse.isTurnActive(id) || muse.activeAgents(id).length || muse.sessionInfo(id)?.status === "running") throw httpError(409, "This chat is still working. Press Stop and wait for it to finish, then undo.");
+      if (muse.activeAgents(id).length || (await muse.isRunning(id))) throw httpError(409, "This chat is still working. Press Stop and wait for it to finish, then undo.");
       try {
         return sendJson(res, 200, await restoreSnapshot(meta.snapshot));
       } catch (e) {
@@ -1111,7 +1195,7 @@ async function handleApi(req, res, url) {
       const folderMode = url.searchParams.get("folder") || "keep";
       if (folderMode !== "keep" && folderMode !== "recycle") throw httpError(400, "Unknown folder option.");
       const deleteFolder = folderMode === "recycle";
-      if (muse.isTurnActive(id) || muse.activeAgents(id).length || muse.sessionInfo(id)?.status === "running") throw httpError(409, `This chat is still working. Press Stop and wait for it to finish, then ${deleteFolder ? "delete" : "remove"} it.`);
+      if (muse.activeAgents(id).length || (await muse.isRunning(id))) throw httpError(409, `This chat is still working. Press Stop and wait for it to finish, then ${deleteFolder ? "delete" : "remove"} it.`);
       const workspace = meta?.workspace || (await workspaceFor(id).catch(() => null));
       let folder = null;
       if (workspace && deleteFolder && fs.existsSync(workspace)) {
@@ -1133,6 +1217,7 @@ async function handleApi(req, res, url) {
         } catch (e) {
           throw httpError(500, `Could not delete ${resolved}: ${e.message}. Close any program using it and press Delete again.`);
         }
+        store.removeSpend(resolved); // the folder's token record ends with the folder
         folder.binName = check.binName;
       } else if (workspace) {
         folder = { keptFolder: path.resolve(workspace) };
@@ -1218,16 +1303,25 @@ async function handleApi(req, res, url) {
       if (!input.some((p) => p.type === "text")) input.unshift({ type: "text", text: "(see attached image)" });
       // The chat's Agents mode rides along as a short instruction the model sees but the transcript does not show.
       const directive = agentDirective(agentModeOf(store.chat(chatId)), { isolation: trustOf(workspace).isolation, helperModel: config.agentHelperModel, helperEffort: config.agentHelperEffort, maxChildren: config.agentMaxChildren });
-      if (directive) input.find((p) => p.type === "text").text += `\n\n${directive}`;
+      const ifBusy = IF_BUSY.includes(body.ifBusy) ? body.ifBusy : "queue"; // while a reply runs: wait for it, nudge it, or replace it
+      // A nudge joins a reply that already carries the directive.
+      if (directive && !(ifBusy === "steer" && muse.isTurnActive(chatId))) input.find((p) => p.type === "text").text += `\n\n${directive}`;
       const names = [...attached.map((a) => a.name), ...images.map((i, n) => i.name || `image ${n + 1}`)];
       const displayText = names.length ? `${text}${text ? "\n\n" : ""}📎 ${names.join(", ")}` : text || undefined;
       const out = await muse.send(chatId, workspace, {
         input,
         displayText,
+        ifBusy,
       });
       const meta = store.chat(chatId);
       if (!meta || (!meta.title && text)) store.upsertChat(chatId, { workspace, title: meta?.title || (text ? text.trim().slice(0, 60) : undefined) });
       return sendJson(res, 200, { ...out, chatId });
+    }
+    // Take back a message that is waiting for the running reply (then the page nudges, pushes or recalls it).
+    if (method === "POST" && sub === "unqueue") {
+      if (draft) throw httpError(404, "That message is no longer waiting.");
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await muse.unqueue(id, String(body.turnId || "")));
     }
     if (method === "POST" && sub === "upload") {
       // Saved inside the chat's workspace so Muse reads it as @relative/path:
@@ -1436,7 +1530,8 @@ function tabsChanged() {
 function idleCheck() {
   idleTimer = null;
   if (stopping || openTabs() > 0) return;
-  if (muse.busy()) {
+  if (muse.busy() || muse.scheduledChats()) {
+    // A scheduled job fires only while the dashboard (and its Muse host) runs: stay up for it.
     idleTimer = setTimeout(idleCheck, Math.min(IDLE_MS, 60000));
     return;
   }

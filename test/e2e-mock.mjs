@@ -25,7 +25,7 @@ fs.writeFileSync(cfg, JSON.stringify({
   projectsDir: process.env.MD_TEST_CHATS, idleShutdownSeconds: 0, open: false, sandbox: true, approvalMode: "onRequest", testRecycleBin: { dir: binDir },
   autoUpdate: true, updateCommand: [process.execPath, path.join(APP, "test", "fake-update.mjs"), updDir, "9.1.0-R2.1"], updateStateDir: updDir,
   museBin: process.execPath, museArgs: [path.join(APP, "mock", "mock-muse.mjs")],
-  historyTurns: 2, turnStepWarn: 2, turnStepLimit: 3, agentTokenWarn: 150000, agentTokenLimit: 600000, agentStallMinutes: 0.05,
+  historyTurns: 2, turnStepWarn: 2, turnStepLimit: 3, cronRunWarn: 2, agentTokenWarn: 150000, agentTokenLimit: 600000, agentStallMinutes: 0.05,
 }));
 // Muse's trust store for this run: only the project folder is trusted (the Projects chats are not).
 const cfgHome = path.join(T, "cfghome");
@@ -36,7 +36,7 @@ const termId = "11111111-2222-4333-8444-555555555555";
 const now = new Date().toISOString();
 fs.writeFileSync(process.env.MOCK_MUSE_STATE, JSON.stringify({ [termId]: { sessionId: termId, workspaceRoot: proj, createdAt: now, updatedAt: now, events: [], turnCount: 0, firstUserPrompt: "started in the terminal" } }));
 const server = spawn(process.execPath, [path.join(APP, "server.js"), "--no-open", "--data-dir", dataDir, "--config", cfg], {
-  cwd: APP, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, MOCK_MUSE_VERSION: "9.1.0-R2.1", MUSE_DASHBOARD_SUPERVISED: "", XDG_CONFIG_HOME: cfgHome },
+  cwd: APP, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, MOCK_MUSE_VERSION: "9.1.0-R2.1", MUSE_DASHBOARD_SUPERVISED: "", XDG_CONFIG_HOME: cfgHome, META_API_KEY: "mock-env-key" }, // env key: the dashboard starts in API-key (env) mode, so folder spend counts as billable
 });
 let serverLog = "";
 server.stdout.on("data", (c) => (serverLog += c));
@@ -227,6 +227,37 @@ gp = await (await fetch(base + `api/chats/${P}`, { headers: H })).json();
 const sumF = gp.items.find((i) => i.kind === "turnSummary" && i.turnId === tf.turnId);
 ok(sumF?.agents?.count === 3 && sumF.agents.input === 90000, "reloaded reply summary includes its subagents");
 ok(gp.items.some((i) => i.kind === "workflow" && i.status === "completed") && gp.items.filter((i) => i.kind === "subagent").length === 3, "history carries the workflow and its subagent items");
+
+// ---- scheduled jobs (Muse's cron tools): the mock answers like Muse 1.4.13 (no receipts) and runs the job three times ----
+const waitAfter = async (from, pred, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { const e = events.slice(from).find(pred); if (e) return e; await new Promise((r) => setTimeout(r, 50)); } return null; };
+let mark = events.length;
+await sendP("schedule check please");
+let cronEv = await waitAfter(mark, (e) => e.ev === "cron" && e.data.sessionId === P && e.data.summary && e.data.summary.count === 1);
+const job0 = cronEv && cronEv.data.jobs[0];
+ok(!!job0 && job0.cron === "* * * * *" && job0.schedule === "every minute" && job0.prompt === "Reply with the single word PING." && job0.approx === true && job0.nextFireAtMs > Date.now() - 60000, "cron_create (Muse 1.4.13 output, no receipt) becomes a job with its schedule, prompt and an estimated next run: " + JSON.stringify(job0));
+let gc = await (await fetch(base + `api/chats/${P}`, { headers: H })).json();
+ok(gc.cronJobs.length === 1 && gc.cronJobs[0].jobId === job0.jobId, "opening the chat lists its scheduled jobs");
+const lc = await (await fetch(base + "api/chats", { headers: H })).json();
+ok(lc.chats.find((c) => c.id === P).cron?.count === 1 && lc.chats.find((c) => c.id === P).cron.schedule === "every minute", "the chat list carries the schedule summary for the sidebar");
+const woke = await waitAfter(mark, (e) => e.ev === "muse" && e.data.sessionId === P && e.data.params?.item?.kind === "scheduledFire");
+ok(!!woke && woke.data.params.item.deliveryNumber === 1 && woke.data.params.item.turnId, "a scheduled run arrives as a scheduledFire item in a turn of its own");
+cronEv = await waitAfter(mark, (e) => e.ev === "cron" && e.data.sessionId === P && e.data.jobs[0]?.fires === 1 && e.data.jobs[0].approx === false);
+ok(!!cronEv, "the run replaces the estimate with Muse's exact next time and counts the delivery");
+cronEv = await waitAfter(mark, (e) => e.ev === "cron" && e.data.sessionId === P && e.data.summary === null, 12000);
+ok(!!cronEv && cronEv.data.jobs.length === 0, "a final delivery (no next time) clears the job");
+const runNotices = events.slice(mark).filter((e) => e.ev === "app-notice" && e.data.sessionId === P && /scheduled job in this chat has run 2 times \(every minute\)/.test(e.data.message));
+ok(runNotices.length === 1, `one notice when a job reaches cronRunWarn runs (${runNotices.length})`);
+gc = await (await fetch(base + `api/chats/${P}`, { headers: H })).json();
+const runs = gc.items.filter((i) => i.kind === "scheduledFire").map((i) => i.deliveryNumber);
+ok(runs.join() === "2,3" && gc.cronJobs.length === 0, `history (newest ${2} turns) shows runs 2 and 3; nothing is scheduled any more (runs ${runs.join()}, jobs ${JSON.stringify(gc.cronJobs)})`);
+mark = events.length;
+await sendP("schedule check again");
+ok(!!(await waitAfter(mark, (e) => e.ev === "cron" && e.data.sessionId === P && e.data.summary?.count === 1)), "a new job can be scheduled after the last one ended");
+mark = events.length;
+await sendP("cancel job");
+cronEv = await waitAfter(mark, (e) => e.ev === "cron" && e.data.sessionId === P && e.data.summary === null);
+ok(!!cronEv, "cron_delete (args { id }, output \"Removed scheduled job <id>.\") clears the job");
+ok((await (await fetch(base + "api/chats", { headers: H })).json()).chats.find((c) => c.id === P).cron === null, "the chat list no longer shows a schedule");
 let lstP = await (await fetch(base + "api/chats", { headers: H })).json();
 ok(lstP.chats.find((c) => c.id === P)?.agentUsage?.input === 90000, "chat list row carries the agent totals");
 const kid = gp.items.find((i) => i.kind === "subagent" && i.childSessionId);
@@ -307,6 +338,62 @@ ok(r.status === 200, "approve accepted");
 ok(!!(await waitFor((e) => e.ev === "muse" && e.data.method === "approval/resolved")), "approval resolved by host");
 ok(!!(await waitFor((e) => e.ev === "muse" && e.data.method === "turn/completed" && e.data.params.turnId === t2.turnId)), "turn after approval completed");
 
+// ---- while a reply runs: queue (default), nudge (steer), push (replace), recall (unqueue) ----
+// A turn blocked on an approval is a reliably busy reply.
+const since = (from, pred, ms = 8000) => { const t = Date.now(); return (async () => { while (Date.now() - t < ms) { const e = events.slice(from).find(pred); if (e) return e; await new Promise((r) => setTimeout(r, 50)); } return null; })(); };
+const post = async (text, extra = {}) => (await fetch(base + `api/chats/${chat.id}/messages`, { method: "POST", headers: H, body: JSON.stringify({ text, ...extra }) })).json();
+let qm = events.length;
+const busy1 = await post("please approve something");
+const arq = await since(qm, (e) => e.ev === "approval-request");
+ok(!!arq && busy1.disposition === "started", "a fresh message starts a turn (disposition started)");
+const q1 = await post("queued note");
+ok(q1.disposition === "queued" && q1.turnId && q1.turnId !== busy1.turnId, "a message sent while the reply runs is queued by default (disposition queued)");
+let qe = await since(qm, (e) => e.ev === "queue-changed" && e.data.sessionId === chat.id && e.data.queued.length === 1);
+ok(!!qe && qe.data.queued[0].turnId === q1.turnId && qe.data.queued[0].text === "queued note", "the page is told what is waiting (queue-changed)");
+let gq = await (await fetch(base + `api/chats/${chat.id}`, { headers: H })).json();
+ok(gq.queued.length === 1 && gq.queued[0].turnId === q1.turnId, "opening the chat lists the waiting message");
+ok((await (await fetch(base + "api/chats", { headers: H })).json()).chats.find((c) => c.id === chat.id).queued === 1, "the chat list counts waiting messages");
+const n1 = await post("nudge: also mention cats", { ifBusy: "steer" });
+ok(n1.disposition === "steered" && n1.turnId === busy1.turnId, "ifBusy steer hands the message to the running turn (disposition steered, same turn)");
+const steered = await since(qm, (e) => e.ev === "muse" && e.data.params?.item?.kind === "userMessage" && e.data.params.item.steered === true);
+ok(!!steered && steered.data.params.item.text.includes("mention cats"), "the nudge shows as a steered user message in the running turn");
+r = await fetch(base + `api/chats/${chat.id}/unqueue`, { method: "POST", headers: H, body: JSON.stringify({ turnId: q1.turnId }) });
+ok(r.status === 200 && (await r.json()).queued.length === 0, "unqueue takes a waiting message back");
+ok(!!(await since(qm, (e) => e.ev === "muse" && e.data.method === "turn/unqueued" && e.data.params.turnId === q1.turnId)), "Muse reports the reclaimed turn (turn/unqueued)");
+r = await fetch(base + `api/chats/${chat.id}/unqueue`, { method: "POST", headers: H, body: JSON.stringify({ turnId: q1.turnId }) });
+ok(r.status === 404, "unqueuing it again is refused");
+const q2 = await post("second queued");
+ok(q2.disposition === "queued", "a second message queues too");
+await fetch(base + `api/approvals/${encodeURIComponent(arq.data.key)}`, { method: "POST", headers: H, body: JSON.stringify({ choiceId: "allow-once" }) });
+const done1 = await since(qm, (e) => e.ev === "muse" && e.data.method === "turn/completed" && e.data.params.turnId === busy1.turnId);
+ok(!!done1, "the busy turn completes after the approval");
+ok(!!(await since(qm, (e) => e.ev === "muse" && e.data.method === "turn/started" && e.data.params.turnId === q2.turnId)), "the queued message launches as the next turn");
+ok(!!(await since(qm, (e) => e.ev === "queue-changed" && e.data.sessionId === chat.id && e.data.queued.length === 0 && events.indexOf(e) > events.indexOf(done1))), "once launched it is no longer listed as waiting");
+ok(!!(await since(qm, (e) => e.ev === "muse" && e.data.method === "turn/completed" && e.data.params.turnId === q2.turnId)), "the queued turn completes");
+gq = await (await fetch(base + `api/chats/${chat.id}`, { headers: H })).json();
+ok(gq.items.some((i) => i.kind === "userMessage" && i.steered && i.text.includes("mention cats")) && gq.items.some((i) => i.kind === "agentMessage" && i.text.includes("Noted: nudge")), "history keeps the nudge and the reply that took it in");
+qm = events.length;
+const busy2 = await post("please approve something");
+ok(!!(await since(qm, (e) => e.ev === "approval-request")), "another blocked turn");
+const push = await post("push this instead", { ifBusy: "replace" });
+ok(push.disposition === "started" && push.turnId !== busy2.turnId, "ifBusy replace starts a new turn (disposition started)");
+const cut = await since(qm, (e) => e.ev === "muse" && e.data.method === "turn/completed" && e.data.params.turnId === busy2.turnId);
+ok(!!cut && cut.data.params.terminal === "cancelled", "the replaced turn ends cancelled");
+ok(!!(await since(qm, (e) => e.ev === "muse" && e.data.method === "turn/completed" && e.data.params.turnId === push.turnId)), "the pushed message's turn completes");
+// A chat list fetched while a reply ran (its row says "running") must not make Delete refuse once the reply has ended.
+{
+  const d = await (await fetch(base + "api/chats", { method: "POST", headers: H, body: JSON.stringify({ title: "Busy then gone" }) })).json();
+  const from = events.length;
+  const sent = await (await fetch(base + `api/chats/${d.id}/messages`, { method: "POST", headers: H, body: JSON.stringify({ text: "please approve something" }) })).json();
+  const ar2 = await since(from, (e) => e.ev === "approval-request");
+  const busyRow = (await (await fetch(base + "api/chats", { headers: H })).json()).chats.find((c) => c.id === sent.chatId);
+  ok(!!ar2 && busyRow && busyRow.status === "running", "a list fetched mid-reply says the chat is running");
+  await fetch(base + `api/approvals/${encodeURIComponent(ar2.data.key)}`, { method: "POST", headers: H, body: JSON.stringify({ choiceId: "allow-once" }) });
+  ok(!!(await since(from, (e) => e.ev === "muse" && e.data.method === "turn/completed" && e.data.params.turnId === sent.turnId)), "its reply ends");
+  r = await fetch(base + `api/chats/${sent.chatId}`, { method: "DELETE", headers: H });
+  ok(r.status === 200, `Delete right after the reply ends is accepted; the stale list row is not trusted (${r.status})`);
+}
+
 // Approve all: the tool runs with no approval card
 await fetch(base + `api/chats/${chat.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ approvalMode: "allowAll" }) });
 const cardsBefore = events.filter((e) => e.ev === "approval-request").length;
@@ -351,7 +438,8 @@ for (let page = 0; cur && page < 10; page++) {
   cur = e.earlierCursor;
 }
 const allUsers = [...older, ...hist.items].filter((i) => i.kind === "userMessage");
-ok(allUsers.length === 5 && allUsers[0].text.startsWith("Build a tiny snake game") && new Set(allUsers.map((i) => i.itemId)).size === 5 && emptyPages === 0, "Load earlier pages back to the first message without gaps, repeats or empty pages");
+// 10 user messages so far: 5 from the earlier sections plus the busy-reply section's two blocked turns, the nudge, the queued one and the push.
+ok(allUsers.length === 10 && allUsers[0].text.startsWith("Build a tiny snake game") && new Set(allUsers.map((i) => i.itemId)).size === 10 && emptyPages === 0, `Load earlier pages back to the first message without gaps, repeats or empty pages (${allUsers.length} user messages, ${emptyPages} empty pages)`);
 
 // reading never loads a session: a terminal chat stays unloaded until the user types
 const termRow = () => fetch(base + "api/chats?other=1", { headers: H }).then((x) => x.json()).then((l) => l.chats.find((c) => c.id === termId));
@@ -498,6 +586,80 @@ if (hasGit) {
 } else console.log("SKIP snapshot checks: git is not installed");
 r = await fetch(base + `api/chats/${chat.id}`, { headers: H });
 ok(r.status === 410, "opening a deleted chat is refused (410)");
+
+// ---- cost estimates (API plans): token spend per folder, priced from Meta's catalog and the user's table; only API-key use is money ----
+{
+  const rowP = async () => (await (await fetch(base + "api/chats", { headers: H })).json()).chats.find((c) => c.id === P);
+  const conn = await (await fetch(base + "api/connection", { headers: H })).json();
+  ok(conn.via === "env" && conn.envKey === true, "the test dashboard runs on the environment API key (billable mode)");
+  let pr = await (await fetch(base + "api/prices", { headers: H })).json();
+  ok(pr.enabled === true && Array.isArray(pr.catalog) && pr.catalog.includes("mock-model"), "estimates start on (Muse's catalog supplies prices) and the table lists the models the connection offers: " + JSON.stringify(pr.catalog));
+  r = await fetch(base + "api/prices", { method: "POST", headers: H, body: JSON.stringify({ enabled: false, models: {} }) });
+  ok(r.status === 200 && (await (await fetch(base + "api/spend", { headers: H })).json()).totals === null, "switched off: no totals");
+  ok(pr.catalogPrices && pr.catalogPrices["mock-model"].output === 2 && pr.catalogPrices["mock-model"].cached === 0.1 && !pr.catalogPrices["mock-big"] && !!pr.catalogAt, "the prices Muse reports from the catalog are remembered (cost blocks only): " + JSON.stringify(pr.catalogPrices));
+  ok((await rowP()).folderCost === null, "no estimate while the table is off");
+  r = await fetch(base + "api/prices", { method: "POST", headers: H, body: JSON.stringify({ enabled: true, models: { "mock-model": { input: "abc" } } }) });
+  ok(r.status === 400 && /mock-model: input price/.test((await r.json()).error || ""), "a bad price is refused with the model and field named");
+  r = await fetch(base + "api/prices", { method: "POST", headers: H, body: JSON.stringify({ enabled: true, models: { "mock-model": { input: 1, cached: 0.1, output: 2 } } }) });
+  pr = await r.json();
+  ok(r.status === 200 && pr.enabled && pr.models["mock-model"].output === 2 && !!pr.updatedAt, "prices save with a date stamp");
+  let row = await rowP();
+  // The agents section's helper usage was recorded under the configured helper model, which has no price here: partial, with mock-model itself priced.
+  ok(row.folderCost && row.folderCost.usd > 0 && row.folderCost.tokens.api[0] >= 10 && row.folderKey && !row.folderCost.missing.includes("mock-model") && row.folderCost.models["mock-model"].usd > 0, "once on, the chat's folder shows an estimate from the steps recorded so far: " + JSON.stringify(row.folderCost && { usd: row.folderCost.usd, missing: row.folderCost.missing, tokens: row.folderCost.tokens }));
+  const before = row.folderCost;
+  let mark = events.length;
+  await sendP("spend a little");
+  const sp = await waitAfter(mark, (e) => e.ev === "spend" && e.data.key === row.folderKey);
+  ok(!!sp && sp.data.cost.usd > before.usd && Math.abs(sp.data.cost.usd - before.usd - (10 / 1e6) * 1 - (5 / 1e6) * 2) < 1e-12, "each step adds its tokens (10 fresh in, 5 out) at the table's prices and the page is told (spend)");
+  const tot = (await (await fetch(base + "api/spend", { headers: H })).json()).totals;
+  ok(sp.data.totals && sp.data.totals.usd >= sp.data.cost.usd && tot && tot.usd === sp.data.totals.usd && tot.tokens.api[0] >= sp.data.cost.tokens.api[0], "the sidebar Total sums every project folder and is never below one folder's estimate: " + JSON.stringify({ total: tot && tot.usd, folder: sp.data.cost.usd }));
+  const gP = await (await fetch(base + `api/chats/${P}`, { headers: H })).json();
+  ok(gP.folderKey === row.folderKey && gP.folderCost.usd === sp.data.cost.usd && gP.folderCost.models["mock-model"], "opening the chat carries the folder estimate with a per-model breakdown");
+  // Subscription: tokens are still counted, but no dollar figure is shown anywhere (a flat fee)
+  const apiBefore = sp.data.cost;
+  mark = events.length;
+  r = await fetch(base + "api/connection/mode", { method: "POST", headers: H, body: JSON.stringify({ mode: "subscription" }) });
+  ok(r.status === 200, "switched to the subscription");
+  ok((await rowP()).folderCost === null && (await (await fetch(base + "api/spend", { headers: H })).json()).totals === null && !!(await waitAfter(mark, (e) => e.ev === "prices-changed")), "on the subscription no folder shows a dollar figure, the box has no total, and the page is told to redraw");
+  mark = events.length;
+  await sendP("spend on the subscription");
+  const sp2 = await waitAfter(mark, (e) => e.ev === "spend" && e.data.key === row.folderKey);
+  ok(!!sp2 && sp2.data.cost === null && sp2.data.totals === null, "a subscription step is recorded but priced at nothing");
+  r = await fetch(base + "api/connection/mode", { method: "POST", headers: H, body: JSON.stringify({ mode: "env" }) });
+  ok(r.status === 200, "back on the environment key");
+  row = await rowP();
+  ok(row.folderCost && row.folderCost.usd === apiBefore.usd && row.folderCost.tokens.sub[0] >= 10 && row.folderCost.tokens.sub[0] > apiBefore.tokens.sub[0], "back on the key the folder shows the same dollars, with the subscription tokens counted apart");
+  mark = events.length;
+  // Nothing typed: Muse's catalog prices are used; a typed number overrides field by field
+  r = await fetch(base + "api/prices", { method: "POST", headers: H, body: JSON.stringify({ enabled: true, models: {} }) });
+  row = await rowP();
+  const catUsd = row.folderCost && row.folderCost.models["mock-model"].usd;
+  ok(row.folderCost && catUsd > 0 && !row.folderCost.missing.includes("mock-model"), "with nothing typed, mock-model is priced from the catalog prices Muse reported");
+  r = await fetch(base + "api/prices", { method: "POST", headers: H, body: JSON.stringify({ enabled: true, models: { "mock-model": { input: 10 } } }) });
+  row = await rowP();
+  const mm = row.folderCost.models["mock-model"];
+  ok(mm.usd > catUsd && Math.abs(mm.usd - catUsd - (mm.tokens[0] / 1e6) * 9) < 1e-9, "a typed input price overrides the catalog's; cached and output still follow the catalog");
+  r = await fetch(base + "api/prices", { method: "POST", headers: H, body: JSON.stringify({ enabled: false, models: { "mock-model": { input: 1, cached: 0.1, output: 2 } } }) });
+  ok((await rowP()).folderCost === null && !!(await waitAfter(mark, (e) => e.ev === "prices-changed")), "unticking the box hides the estimates (prices kept) and tells the page");
+}
+
+// ---- Muse preset switch: miniswe on by default, off = Muse's default preset, applied at the next host start ----
+{
+  const hosts = () => fs.readFileSync(`${process.env.MOCK_MUSE_STATE}.hosts`, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  ok(hosts()[0].slice(0, 3).join(" ") === "serve --preset miniswe" && hosts()[0].includes('tools.web_search.mode="off"'), "the host starts with `serve --preset miniswe` by default, with web search off (the preset has no web tools): " + JSON.stringify(hosts()[0].slice(0, 5)));
+  ok((await (await fetch(base + "api/state", { headers: H })).json()).musePreset === "miniswe", "state reports the preset");
+  const mark = events.length;
+  r = await fetch(base + "api/settings/preset", { method: "POST", headers: H, body: JSON.stringify({ miniswe: false }) });
+  const pr = await r.json();
+  ok(r.status === 200 && pr.musePreset === null, "switching miniswe off is accepted");
+  ok(!!(await waitAfter(mark, (e) => e.ev === "muse-restarted" && e.data.reason === "preset")), "the idle host is restarted for the preset change");
+  await sendP("hello default preset");
+  const last = hosts()[hosts().length - 1];
+  ok(hosts().length >= 2 && !last.includes("--preset"), "the next host starts without --preset: " + JSON.stringify(last.slice(0, 3)));
+  ok(JSON.parse(fs.readFileSync(path.join(dataDir, "index.json"), "utf8")).settings.musePreset === null, "the choice is saved for the next dashboard start");
+  r = await fetch(base + "api/settings/preset", { method: "POST", headers: H, body: JSON.stringify({ miniswe: true }) });
+  ok((await r.json()).musePreset === "miniswe", "and can be switched back on");
+}
 
 ctl.abort();
 console.log(`\n${pass} passed, ${failN} failed`);

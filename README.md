@@ -51,6 +51,17 @@ Created by **Adam S. Barnett**.
   each expandable, so the conversation stays readable.
 - **Cost visibility**: steps and tokens under every reply, a live meter while Muse works, totals
   per chat in the sidebar, context fill (`ctx %`), and your 5-hour and weekly subscription usage.
+- **Cost estimates for API keys**: every model step's tokens are counted per project folder and
+  priced from Meta's catalog (or prices you type), so each folder and the sidebar show an
+  estimated dollar figure; subscription use is never counted in dollars.
+- **Talk to Muse while it works**: a message sent during a reply waits in a card above the
+  composer and goes when the reply ends; from the card you can nudge the running reply with it,
+  push it through instead, or take it back.
+- **Scheduled jobs**: when Muse schedules its own follow-up with its cron tools (a build to wait
+  for, a check later), the Activity head shows a countdown to the next run, the sidebar marks the
+  chat, and the job can be cancelled from there.
+- **Muse preset switch**: the leaner `miniswe` preset is on by default (about 40% fewer tokens per
+  model step in our tests); one Settings switch goes back to Muse's default preset.
 - **Budgets**: a notice and an automatic stop for runaway replies (model steps) and for
   subagents (input tokens).
 - **Snapshots**: before Muse works on an existing folder, save a Git snapshot and undo every
@@ -181,8 +192,26 @@ If the dashboard is started with `META_API_KEY` already set in the environment, 
 offers **META_API_KEY (environment)**, which is the default until you choose. In subscription mode
 the dashboard removes any inherited `META_API_KEY`, so Muse never bills a key you did not choose.
 
-In API-key mode the sidebar shows *API key · billed per use* instead of the subscription bars
-(Muse reports no allowance for a key). The models offered follow the key: Muse lists them itself.
+In API-key mode the sidebar shows **API key · estimated spend** with one **Total** over every
+project folder instead of the subscription bars (Muse reports no allowance for a key). The models
+offered follow the key: Muse lists them itself.
+
+### Cost estimates (API plans)
+
+Meta gives no billing data (no usage or billing endpoint; completions return token counts only),
+so the dashboard counts every model step's fresh, cached and output tokens per project folder,
+under the connection it ran on (API key or subscription), and prices them when shown. Prices come
+from Muse's model catalog (Meta reports USD per 1M tokens per model; they appear a little after a
+Muse start and the dashboard remembers the last ones seen) and are shown grey in **Settings →
+Cost estimates**; type a number to override one or to price a model Meta does not. Estimates are
+on by default (untick **Show cost estimates** to hide them). Each chat's folder shows `≈ $3.42`
+on its sidebar row and in a header chip (hover for the per-model breakdown). Only API-key use
+becomes dollars; on the subscription (a flat fee) no dollar figure is shown anywhere, though the
+tokens are still counted, so switching to a key shows them priced. A price change re-prices all
+history at once; a
+model with no price marks the estimate "+ unpriced". These are estimates from token counts and
+prices and can differ from Meta's bill. A folder's record ends when the folder is deleted; Muse
+used in a terminal is not counted.
 
 ### The Connect dialog
 
@@ -331,6 +360,19 @@ honestly what was and was not verified.
   by itself near the limit).
 - **Opening a chat** shows its newest replies; **Load earlier messages** pages back. Opening only
   reads the history; Muse loads the chat when you start typing.
+- **Sending while a reply runs**: by default the message waits in a card above the composer and
+  goes when the reply ends. From the card, **Nudge now** hands it to the running reply at its next
+  model step (the work carries on with your note in mind, shown as *You · nudge*), **Push now**
+  interrupts the reply and sends it instead, and **Recall** takes it back into the composer.
+  **Settings → While a reply runs** makes Enter nudge instead of queue.
+- **Scheduled jobs**: when Muse schedules a follow-up with its own cron tools (the execution
+  policy asks it to for a build, deploy or check it must wait for), the Activity head shows
+  **Wakes in 4m 10s** with a pulsing dot (orange when due, green while the woken reply runs), the
+  Activity button and the sidebar row show a mini countdown, and each run appears in the
+  conversation as *Muse woke up for a scheduled job*. Click the chip to see or cancel a job (Muse
+  is asked to delete it). Jobs run only while the dashboard is open; chats with a job are kept
+  loaded, reloaded at the next start, and keep the dashboard from stopping for idleness. After
+  `cronRunWarn` runs of one job (10) a notice suggests cancelling it.
 
 ### Agents mode (per chat)
 
@@ -354,10 +396,14 @@ file uploaded twice in a chat is stored once.
 - **Muse badge** (top right): the running Muse version; click for details and **Check for
   updates now**. Blue dot: just updated. Orange: update available or the check failed. Grey
   pulsing: checking. Red: problem.
-- **Settings**: the connection (status, subscription or API key, the saved key), show hidden
-  chats, show chats from outside this dashboard, the starting effort and approvals for new chats,
-  and **Restart** (restarts the dashboard and Muse and reloads the page; refused while a
-  reply runs).
+- **Settings**: the connection (status, subscription or API key, the saved key), cost estimates
+  (the price table), show hidden chats, show chats from outside this dashboard, the starting
+  effort and approvals for new chats, what Enter does while a reply runs, the **miniswe** preset
+  switch (on by default: a leaner Muse with shell-centred edits and a smaller fixed prompt, about
+  40% fewer tokens per model step at the same correctness in our tests; web search is off under
+  it since the preset has no web tools; off = Muse's default preset; applies to the next Muse
+  start, which happens once nothing is running), and **Restart** (restarts the dashboard and Muse
+  and reloads the page; refused while a reply runs).
 
 ### Starting and stopping
 
@@ -424,6 +470,8 @@ committed to Git.
 | `agentMaxChildren` | `4` | children at once in Parallel |
 | `agentTokenWarn` / `agentTokenLimit` | `1500000` / `4000000` | notice / stop when one reply's subagents have read this many input tokens (`0` = never) |
 | `agentStallMinutes` | `10` | notice when a working subagent has shown no progress this long (`0` = never) |
+| `cronRunWarn` | `10` | notice once when one scheduled job (Muse's cron tools) has run this many times (`0` = never) |
+| `musePreset` | `miniswe` | `muse serve --preset <name>` for the host; `null` = Muse's default preset. The Settings switch overrides this and is remembered |
 | `museSettings` | see example | Muse settings passed to `muse serve` as `-c key=<json>`. The example keeps tool output in context, sizes Muse's compaction for ~256k tokens, and caps concurrent agents at 6. Muse refuses unknown keys, so a typo stops Muse with an error |
 | `museDeveloperPrompt` | `EXECUTION-POLICY.md` | file (in the dashboard folder) sent to Muse as its developer prompt; `null` = none |
 | `debug` | `false` | print Muse's own log output in the dashboard window |
@@ -501,6 +549,8 @@ Muse_Dashboard_v1/
 │   ├── api-key.js            API key: OS-encrypted storage, Meta's key check, Muse's environment
 │   ├── install.js            Finds the installed Muse; runs Muse's own updater
 │   ├── agents.js             Agents modes, Muse's folder-trust rule, subagent usage
+│   ├── cron.js               Scheduled jobs: Muse's cron tool calls and runs folded into one record per job
+│   ├── spend.js              Token spend per folder, the price table and the dollar estimate
 │   ├── snapshot.js           Git snapshots and undo of a chat's folder
 │   ├── recycle.js            Delete → Recycle Bin / Trash: size check, move, confirm it was kept
 │   ├── github.js             GitHub links in a chat: clone, commit identity, push guard

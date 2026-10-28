@@ -34,6 +34,13 @@
     agentsRunning: new Set(), // sessionIds whose subagents/workflows are still working (they outlive the turn)
     agentStats: null, // { turnId, active, count, input, cached, output } latest for the open chat
     attention: new Set(), // sessionIds with a pending approval
+    chatsLoaded: false, // the first chat list has arrived (before that the sidebar says Muse is starting)
+    cronJobs: [], // scheduled jobs of the open chat, soonest first (Muse's cron tools)
+    queued: [], // messages Muse admitted while the open chat's reply ran; they launch when it ends ({ turnId, text })
+    prices: null, // the cost-estimate price table from Settings ({ enabled, updatedAt, models, catalog })
+    spend: null, // the estimate over all project folders for the sidebar box (null while estimates are off)
+    queuedBodies: new Map(), // turnId -> the request body of a queued message, so Nudge / Push can resend it
+    wokeTurnId: null, // the turn a scheduled job started, while it runs
     showHidden: false,
     showOther: false,
     models: [], // last model/list rows for the header picker
@@ -134,11 +141,15 @@
       const q = [state.showHidden && "hidden=1", state.showOther && "other=1"].filter(Boolean).join("&");
       const data = await api("GET", `/api/chats${q ? `?${q}` : ""}`);
       state.chats = data.chats;
+      state.chatsLoaded = true;
       if (data.museError) toast(`Could not list Muse sessions: ${data.museError}`, true);
       for (const c of state.chats) if (c.status === "running") state.running.add(c.id);
       renderChatList();
+      renderCostChip();
     } catch (e) {
       toast(`Could not load chats: ${e.message}`, true);
+      state.chatsLoaded = true;
+      renderChatList();
     }
   }
   let listTimer = null;
@@ -174,8 +185,15 @@
       const tt = el("div", "t ci-title", c.title);
       item.appendChild(tt);
       const usage = tokenSummary(c.tokenUsage, c.agentUsage);
-      item.appendChild(el("div", "sub", c.draft && !c.workspace ? "new chat folder" : usage.text));
-      item.title = [c.title, c.workspace || "", usage.title, c.other && "From outside this dashboard (terminal or another copy)"].filter(Boolean).join("\n");
+      item.appendChild(el("div", "sub", c.draft && !c.workspace ? "new chat folder" : [usage.text, c.queued ? `⏳ ${c.queued} waiting` : "", c.folderCost ? `≈ ${fmtUsd(c.folderCost.usd)}${c.folderCost.partial ? "+" : ""}` : ""].filter(Boolean).join(" · ")));
+      item.title = [c.title, c.workspace || "", usage.title, c.other && "From outside this dashboard (terminal or another copy)", c.folderCost ? `Folder so far: ≈ ${fmtUsd(c.folderCost.usd)} on the API key${c.folderCost.partial ? " (some models have no price yet)" : ""}; an estimate from token prices, not Meta's bill.` : ""].filter(Boolean).join("\n");
+      if (c.cron && c.cron.count) {
+        const s = el("span", "sched", `⏰ ${c.cron.nextFireAtMs ? fmtWait(c.cron.nextFireAtMs - Date.now(), true) : "waiting"}`);
+        s.dataset.next = c.cron.nextFireAtMs || "";
+        s.title = `${c.cron.count === 1 ? "A scheduled job" : `${c.cron.count} scheduled jobs`}: Muse wakes this chat up by itself${c.cron.schedule ? ` (${c.cron.schedule})` : ""}${c.cron.nextFireAtMs ? `, next ${c.cron.approx ? "about " : ""}${new Date(c.cron.nextFireAtMs).toLocaleTimeString()}` : ""}.${c.cron.prompt ? `\n“${c.cron.prompt}”` : ""}`;
+        item.classList.add("has-sched");
+        item.appendChild(s);
+      }
       if (state.attention.has(c.id)) item.appendChild(el("span", "dot attn"));
       else if (state.running.has(c.id) || state.agentsRunning.has(c.id)) item.appendChild(el("span", "dot"));
       if (c.id !== "draft") {
@@ -194,7 +212,7 @@
       }
       list.appendChild(item);
     }
-    if (!list.children.length) list.appendChild(el("div", "group-label", q ? "No matches" : "No chats yet"));
+    if (!list.children.length || (!state.chatsLoaded && !q)) list.appendChild(el("div", "group-label", !state.chatsLoaded ? "Starting Muse…" : q ? "No matches" : "No chats yet"));
   }
 
   function openMenu(ev, chat) {
@@ -347,6 +365,134 @@
       empty.id = "activityEmpty";
       list.appendChild(empty);
     } else if (count && empty) empty.remove();
+    renderCronWait();
+  }
+
+  // ---------- scheduled jobs (Muse's cron tools) ----------
+  /** "42s", "4m 10s", "1h 05m", "2d 3h"; `short` keeps the biggest unit only. "due now" once the time has passed. */
+  function fmtWait(ms, short) {
+    if (!(ms > 0)) return short ? "due" : "due now";
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return short ? `${m}m` : `${m}m ${String(s % 60).padStart(2, "0")}s`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return short ? `${h}h` : `${h}h ${String(m % 60).padStart(2, "0")}m`;
+    return short ? `${Math.floor(h / 24)}d` : `${Math.floor(h / 24)}d ${h % 24}h`;
+  }
+  const CRON_NOTE = "Muse wakes this chat up by itself at these times. Jobs run only while the dashboard is open.";
+  /** One line per job: "every 5 min · “check the build” · in 4m 10s · ran 3×". */
+  function cronLine(j) {
+    const prompt = j.prompt ? `“${j.prompt.length > 80 ? `${j.prompt.slice(0, 79)}…` : j.prompt}”` : "";
+    const when = j.nextFireAtMs ? `in ${j.approx ? "about " : ""}${fmtWait(j.nextFireAtMs - Date.now())}` : "time unknown";
+    return [j.schedule || j.cron || "scheduled", prompt, when, j.fires ? `ran ${j.fires}×` : ""].filter(Boolean).join(" · ");
+  }
+  /** The Activity head chip (and its mini copy on the Activity button) for the open chat's next scheduled run. */
+  function renderCronWait() {
+    const jobs = state.current && !state.current.draft ? state.cronJobs : [];
+    const btn = $("cronWait"), mini = $("activityCron");
+    btn.classList.toggle("hidden", !jobs.length);
+    mini.classList.toggle("hidden", !jobs.length);
+    if (!jobs.length) { btn.dataset.next = ""; mini.dataset.next = ""; return; }
+    const next = jobs[0];
+    btn.dataset.next = mini.dataset.next = next.nextFireAtMs || "";
+    btn.dataset.approx = next.approx ? "1" : "";
+    btn.dataset.label = [jobs.length > 1 ? `${jobs.length} jobs` : next.schedule || "", next.fires >= 5 ? `ran ${next.fires}×` : ""].filter(Boolean).join(" · ");
+    btn.title = mini.title = `${CRON_NOTE}\n\n${jobs.map((j) => `• ${cronLine(j)}`).join("\n")}\n\nClick to see or cancel a job.`;
+    tickCron();
+  }
+  /** Once a second: every countdown on the page ([data-next] = the run's epoch ms). */
+  function tickCron() {
+    const now = Date.now();
+    for (const n of document.querySelectorAll("[data-next]")) {
+      const t = Number(n.dataset.next);
+      const due = !!t && t - now <= 0;
+      const woke = !!state.activeTurnId && state.wokeTurnId === state.activeTurnId && n.closest("#activityPanel, #activityToggle");
+      n.classList.toggle("due", due && !woke);
+      n.classList.toggle("woke", !!woke);
+      if (n.id === "cronWait") {
+        const tail = n.dataset.label ? ` · ${n.dataset.label}` : "";
+        $("cronWaitText").textContent = woke ? "Woke up · working" : !t ? `Waiting${tail}` : due ? `Due now${tail}` : `Wakes in ${n.dataset.approx ? "~" : ""}${fmtWait(t - now)}${tail}`;
+      }
+      else n.textContent = `⏰ ${woke ? "awake" : t ? fmtWait(t - now, true) : "waiting"}`;
+    }
+  }
+  function openCronMenu(ev) {
+    closeMenu();
+    const m = el("div", "menu cron-menu");
+    m.id = "ctxMenu";
+    m.appendChild(el("div", "menu-note", CRON_NOTE));
+    for (const j of state.cronJobs) {
+      const row = el("div", "cron-row");
+      row.appendChild(el("div", "cron-main", cronLine(j)));
+      const b = el("button", "", "Cancel");
+      b.addEventListener("click", () => { closeMenu(); cancelCronJob(j); });
+      row.appendChild(b);
+      m.appendChild(row);
+    }
+    document.body.appendChild(m);
+    const r = ev.currentTarget.getBoundingClientRect();
+    m.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - m.offsetWidth - 8))}px`;
+    m.style.top = `${r.bottom + 4}px`;
+    setTimeout(() => document.addEventListener("click", closeMenu, { once: true }), 0);
+  }
+  /** The dashboard has no cron API of its own: cancelling asks Muse, which deletes the job with cron_delete. */
+  async function cancelCronJob(job) {
+    if (!state.current || state.currentId === "draft") return;
+    if (state.activeTurnId) return toast("Wait for the current reply to finish, then cancel the job.");
+    const yes = await askYesNo({ title: "Cancel this scheduled job?", text: `Muse will be asked to delete it:\n\n${cronLine(job)}`, yes: "Cancel job", no: "Keep it" });
+    if (!yes) return;
+    try {
+      await api("POST", `/api/chats/${state.current.id}/messages`, { text: `Call cron_delete for job ${job.jobId}${job.schedule ? ` (${job.schedule})` : ""}, then reply with one line saying it is cancelled.` });
+      if (!state.activeTurnId) { state.activeTurnId = "pending"; updateRunState(); }
+    } catch (e) { toast(`Could not cancel the job: ${e.message}`, true); }
+  }
+
+  // ---------- messages waiting for the running reply ----------
+  /** Cards above the composer for messages Muse admitted while a reply ran: they launch when it ends unless nudged, pushed or recalled. */
+  function renderQueue() {
+    const box = $("queueBox");
+    box.textContent = "";
+    const rows = state.current && !state.current.draft ? state.queued : [];
+    box.classList.toggle("hidden", !rows.length);
+    for (const q of rows) {
+      const card = el("div", "queued-card");
+      const main = el("div", "q-main");
+      main.appendChild(el("div", "q-label", "Waiting · goes when this reply ends"));
+      main.appendChild(el("div", "q-text", q.text || "(attachments)"));
+      card.appendChild(main);
+      const btns = el("div", "q-btns");
+      const add = (label, title, how) => { const b = el("button", "ghost-btn", label); b.title = title; b.addEventListener("click", () => queueAction(q, how)); btns.appendChild(b); };
+      add("Nudge now", "Hand it to the running reply at its next model step; the work carries on with your note in mind.", "steer");
+      add("Push now", "Interrupt the running reply and send this instead.", "replace");
+      add("Recall", "Take it back into the composer.", "recall");
+      card.appendChild(btns);
+      box.appendChild(card);
+    }
+  }
+  /** Take a queued message back from Muse, then nudge (steer), push (replace) or recall it. */
+  async function queueAction(q, how) {
+    if (!state.current) return;
+    const id = state.current.id;
+    const body = state.queuedBodies.get(q.turnId) || { text: q.text, images: [], paths: [] };
+    for (const b of document.querySelectorAll("#queueBox button")) b.disabled = true;
+    try {
+      await api("POST", `/api/chats/${id}/unqueue`, { turnId: q.turnId });
+      state.queuedBodies.delete(q.turnId);
+      if (how === "recall") {
+        const inp = $("input");
+        inp.value = inp.value.trim() ? `${inp.value}\n${body.text}` : body.text;
+        autoGrow();
+        inp.focus();
+        return;
+      }
+      const out = await api("POST", `/api/chats/${id}/messages`, { ...body, ifBusy: how });
+      if (out.disposition === "steered") toast("Nudged: Muse sees it at its next step.");
+      else if (!state.activeTurnId) { state.activeTurnId = "pending"; updateRunState(); }
+    } catch (e) {
+      toast(`Could not ${how === "recall" ? "recall" : how === "steer" ? "nudge" : "push"} the message: ${e.message}`, true);
+      renderQueue();
+    }
   }
 
   function setActivityOpen(open) {
@@ -580,6 +726,96 @@
     renderCompactBtn();
     renderContext();
     renderTrust();
+    renderCostChip();
+  }
+
+  // ---------- cost estimates (API plans) ----------
+  /** "$3.42", "$12.3", "$121", "<$0.01" (same rule as the server's). */
+  function fmtUsd(usd) {
+    const n = Number(usd) || 0;
+    if (n >= 100) return `$${Math.round(n).toLocaleString()}`;
+    if (n >= 10) return `$${n.toFixed(1)}`;
+    if (n >= 0.01) return `$${n.toFixed(2)}`;
+    return n > 0 ? "<$0.01" : "$0.00";
+  }
+  const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(Math.round(n)));
+  /** The open chat's folder total: the latest from the chat list, else what the chat opened with. */
+  function renderCostChip() {
+    const chip = $("costChip");
+    const c = state.current;
+    const row = c && state.chats.find((x) => x.id === c.id);
+    const fc = row ? row.folderCost : c && c.folderCost;
+    chip.classList.toggle("hidden", !c || c.draft || !fc);
+    if (!c || c.draft || !fc) return;
+    chip.textContent = `≈ ${fmtUsd(fc.usd)}${fc.partial ? " + unpriced" : ""}`;
+    chip.classList.toggle("partial", !!fc.partial);
+    const lines = Object.entries(fc.models || {}).map(([id, m]) => `  ${id}: ${fmtUsd(m.usd)} (${fmtTok(m.tokens[0])} fresh · ${fmtTok(m.tokens[1])} cached · ${fmtTok(m.tokens[2])} out)${fc.missing.includes(id) ? " · no price set" : ""}`);
+    const sub = fc.tokens.sub;
+    chip.title = `This folder so far, on the API key: ≈ ${fmtUsd(fc.usd)}\n${lines.join("\n")}${sub.some(Boolean) ? `\n  Subscription use (flat fee, not priced): ${fmtTok(sub[0])} fresh · ${fmtTok(sub[1])} cached · ${fmtTok(sub[2])} out` : ""}\n\nAn estimate from token counts and the prices in Settings; it can differ from Meta's bill.`;
+  }
+  /** Sidebar box in API-key mode: one Total over every project folder, priced with the current table. */
+  function renderSpendBox() {
+    const t = state.spend;
+    const b = $("spendTotal");
+    b.textContent = t ? `≈ ${fmtUsd(t.usd)}${t.partial ? "+" : ""}` : "–";
+    b.classList.toggle("partial", !!(t && t.partial));
+    $("spendNote").textContent = t ? `All projects together${t.partial ? " · + unpriced" : ""}` : "Estimates are off (Settings → Cost estimates).";
+    $("usageApi").title = t
+      ? `Estimated from token counts and prices (Meta's catalog unless you typed your own); it can differ from Meta's bill.\nAll projects: ${fmtTok(t.tokens.api[0])} fresh · ${fmtTok(t.tokens.api[1])} cached · ${fmtTok(t.tokens.api[2])} out on the API key${t.missing.length ? `\nNo price for: ${t.missing.join(", ")}` : ""}\nSubscription use is never counted in dollars.`
+      : "Turn on cost estimates in Settings to see the API spend of all projects here.";
+  }
+  async function loadSpend() {
+    try { state.spend = (await api("GET", "/api/spend")).totals; renderSpendBox(); } catch { /* the box keeps its dashes */ }
+  }
+  async function loadPrices() {
+    try { state.prices = await api("GET", "/api/prices"); renderPrices(); } catch (e) { toast(`Could not load the price table: ${e.message}`, true); }
+  }
+  /** Settings → Cost estimates: one row per model the connection offers (or a folder has used), three prices each. */
+  function renderPrices() {
+    const p = state.prices;
+    if (!p) return;
+    $("costEnabled").checked = !!p.enabled;
+    const cp = p.catalogPrices || {};
+    const nCat = Object.keys(cp).length;
+    $("pricesHint").textContent = [nCat ? `Muse reports prices for ${nCat} model${nCat === 1 ? "" : "s"} from Meta's catalog (as of ${new Date(p.catalogAt).toLocaleString()}); they are used unless you type a number.` : "Muse has reported no catalog prices yet (they arrive shortly after a Muse start); typed prices are used.", p.updatedAt ? `Your prices as of ${new Date(p.updatedAt).toLocaleDateString()}.` : ""].filter(Boolean).join(" ");
+    const t = $("priceTable");
+    t.textContent = "";
+    const ids = [...new Set([...(p.catalog || []), ...Object.keys(p.models || {}), ...Object.keys(cp)])];
+    if (!ids.length) { t.appendChild(el("div", "empty", "No models to price yet: open a chat so Muse lists its models, then come back.")); return; }
+    for (const h of ["Model", "Input $/1M", "Cached $/1M", "Output $/1M"]) t.appendChild(el("div", "ph", h));
+    for (const id of ids) {
+      const name = el("div", "pm", id);
+      if (!(p.catalog || []).includes(id)) name.appendChild(el("small", "", "not offered now; used before"));
+      else if (cp[id]) name.appendChild(el("small", "", "Meta's price shown grey; type to override"));
+      t.appendChild(name);
+      for (const k of ["input", "cached", "output"]) {
+        const inp = el("input");
+        inp.type = "number"; inp.min = "0"; inp.step = "0.01";
+        inp.placeholder = typeof cp[id]?.[k] === "number" ? String(cp[id][k]) : "—";
+        inp.title = typeof cp[id]?.[k] === "number" ? `Meta's catalog: $${cp[id][k]} per 1M tokens. Leave blank to follow it.` : "No catalog price; type one.";
+        inp.dataset.model = id; inp.dataset.field = k;
+        const v = p.models?.[id]?.[k];
+        if (typeof v === "number") inp.value = String(v);
+        t.appendChild(inp);
+      }
+    }
+  }
+  async function savePrices() {
+    const models = {};
+    for (const inp of $("priceTable").querySelectorAll("input[data-model]")) {
+      if (inp.value === "") continue;
+      (models[inp.dataset.model] ||= {})[inp.dataset.field] = inp.value;
+    }
+    const b = $("pricesSave");
+    b.disabled = true;
+    try {
+      const saved = await api("POST", "/api/prices", { enabled: $("costEnabled").checked, models });
+      state.prices = { ...(state.prices || {}), ...saved };
+      renderPrices();
+      toast(saved.enabled ? "Prices saved. Folders now show estimated API cost." : "Prices saved. Tick the box to show estimates.");
+      loadChatsSoon();
+    } catch (e) { toast(`Could not save the prices: ${e.message}`, true); }
+    finally { b.disabled = false; }
   }
 
   /**
@@ -697,9 +933,15 @@
     leaveCurrent();
     state.currentId = id;
     state.current = null;
+    state.cronJobs = [];
+    state.wokeTurnId = null;
+    state.queued = [];
+    state.queuedBodies.clear();
     resetView();
     clearAttachments();
     renderChatList();
+    renderCronWait();
+    renderQueue();
     const box = $("messages");
     box.appendChild(rowWith(el("div", "note", "Loading conversation…")));
     $("chatTitle").textContent = (state.chats.find((c) => c.id === id) || {}).title || "Chat";
@@ -713,14 +955,18 @@
         showDraft();
         return;
       }
-      state.current = { id, workspace: data.workspace, autoFolder: data.autoFolder, title: data.title, hidden: data.hidden, model: data.model, reasoningEffort: data.reasoningEffort || null, approvalMode: data.approvalMode || null, agentMode: data.agentMode || null, trust: data.trust || null, contextUsage: data.contextUsage || null };
+      state.current = { id, workspace: data.workspace, autoFolder: data.autoFolder, title: data.title, hidden: data.hidden, model: data.model, reasoningEffort: data.reasoningEffort || null, approvalMode: data.approvalMode || null, agentMode: data.agentMode || null, trust: data.trust || null, contextUsage: data.contextUsage || null, folderKey: data.folderKey || null, folderCost: data.folderCost || null };
       if (data.model) state.lastModel = data.model;
       state.activeTurnId = data.activeTurnId || null;
       state.turnStats = data.turnStats || null;
       state.agentStats = data.agentsActive ? { active: data.agentsActive } : null;
       if (data.agentsActive) state.agentsRunning.add(id); else state.agentsRunning.delete(id);
+      state.cronJobs = data.cronJobs || [];
+      state.queued = data.queued || [];
       state.earlierCursor = data.earlierCursor || null;
       renderHeader();
+      renderCronWait();
+      renderQueue();
       void loadModels(id);
       // Items that streamed in while the history loaded were drawn into the
       // loading view: start the view over and merge them into the history.
@@ -859,8 +1105,9 @@
     const kind = item.kind;
     if (kind === "userMessage") {
       row.classList.add("msg-user");
+      if (item.steered) row.classList.add("steered"); // handed to a running reply mid-way (a nudge)
       const wrap = el("div");
-      wrap.appendChild(el("div", "role", "You"));
+      wrap.appendChild(el("div", "role", item.steered ? "You · nudge" : "You"));
       wrap.appendChild(el("div", "bubble", item.displayText || item.text || ""));
       if (item.attachments && item.attachments.length) wrap.appendChild(el("div", "att", `🖼 ${item.attachments.length} image${item.attachments.length > 1 ? "s" : ""} attached`));
       row.appendChild(wrap);
@@ -887,6 +1134,10 @@
       const line = turnSummaryText(item);
       if (!line) return false;
       row.appendChild(el("div", `turn-summary${item.terminal === "failed" ? " error" : ""}`, line));
+    } else if (kind === "scheduledFire") {
+      const hhmm = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const when = item.scheduledFireAtMs || Date.parse(item.recordedAt) || Date.now();
+      row.appendChild(el("div", "wake", `⏰ Muse woke up for a scheduled job${item.deliveryNumber ? ` · run ${item.deliveryNumber}` : ""} · ${hhmm(when)}${item.nextFireAtMs ? ` · next ${hhmm(item.nextFireAtMs)}` : " · last run"}`));
     } else if (kind === "compaction") {
       row.appendChild(el("div", "note", "Context was compacted to keep the conversation going."));
     } else if (kind === "damagedRange") {
@@ -1264,7 +1515,7 @@
             if (prev && it.status === "inProgress" && !it.text && prev.text) it.text = prev.text;
             if (prev && it.status === "inProgress" && !it.visibleOutput && prev.visibleOutput) it.visibleOutput = prev.visibleOutput;
             if (prev && !it.usage && prev.usage) it.usage = prev.usage; // a subagent's usage, once seen
-
+            if (it.kind === "scheduledFire" && it.turnId) { state.wokeTurnId = it.turnId; tickCron(); }
             state.items.set(it.itemId, it);
             queueRender(it.itemId);
           }
@@ -1329,6 +1580,35 @@
       if (sum && d.count) { sum.agents = { count: d.count, input: d.input, cached: d.cached, output: d.output }; const row = state.nodes.get(sum.itemId); if (row) { row.textContent = ""; buildRow(row, sum); } }
       updateRunState();
     });
+    // A folder's token record grew (a model step): its chats' estimate and the header chip follow.
+    es.addEventListener("spend", (ev) => {
+      const d = JSON.parse(ev.data);
+      let hit = false;
+      for (const c of state.chats) if (c.folderKey === d.key) { c.folderCost = d.cost; hit = true; }
+      if (state.current && state.current.folderKey === d.key) { state.current.folderCost = d.cost; hit = true; }
+      if (hit) { renderChatList(); renderCostChip(); }
+      if (d.totals !== undefined) { state.spend = d.totals; renderSpendBox(); }
+    });
+    es.addEventListener("prices-changed", () => { loadChatsSoon(); void loadSpend(); if (!$("settingsPanel").classList.contains("hidden")) void loadPrices(); });
+    // Messages waiting for a running reply: Muse admitted one, launched one, or gave one back.
+    es.addEventListener("queue-changed", (ev) => {
+      const d = JSON.parse(ev.data);
+      const c = state.chats.find((x) => x.id === d.sessionId);
+      if (c) { c.queued = d.queued.length; renderChatList(); }
+      if (d.sessionId !== state.currentId) return;
+      state.queued = d.queued;
+      for (const id of [...state.queuedBodies.keys()]) if (!d.queued.some((q) => q.turnId === id)) state.queuedBodies.delete(id);
+      renderQueue();
+    });
+    // Scheduled jobs: a chat's record changed (a job was created, listed, ran, or was deleted).
+    es.addEventListener("cron", (ev) => {
+      const d = JSON.parse(ev.data);
+      const c = state.chats.find((x) => x.id === d.sessionId);
+      if (c) { c.cron = d.summary; renderChatList(); } else loadChatsSoon(); // a chat sent from a draft is not listed yet
+      if (d.sessionId !== state.currentId) return;
+      state.cronJobs = d.jobs || [];
+      renderCronWait();
+    });
     es.addEventListener("chat-usage", (ev) => {
       const d = JSON.parse(ev.data);
       const c = state.chats.find((x) => x.id === d.id);
@@ -1385,6 +1665,7 @@
     es.addEventListener("muse-restarted", (ev) => {
       const reason = JSON.parse(ev.data || "{}").reason;
       if (reason === "update") toast("Restarted Muse to use the new version.");
+      if (reason === "preset") toast("Restarted Muse with the new preset.");
       if (reason === "connection") void reloadModels(); // the restarted host lists the new connection's models
     });
     es.addEventListener("connection", (ev) => setConnection(JSON.parse(ev.data)));
@@ -1407,6 +1688,7 @@
     $("stopBtn").classList.toggle("hidden", !running);
     $("stopBtn").title = agents ? "Stop the reply and its subagents" : "Stop the current reply";
     $("sendBtn").classList.toggle("hidden", turn && !$("input").value.trim() && !state.attachments.length);
+    $("sendBtn").title = !turn ? "Send" : state.defaults.busySend === "steer" ? "Nudge: the running reply sees this at its next step and carries on" : "Queue: waits above the composer and goes when this reply ends (nudge, push or recall it from there)";
     renderCompactBtn();
   }
 
@@ -1475,6 +1757,8 @@
       images: ready.filter((a) => a.kind === "image").map((a) => ({ mediaType: a.mediaType, base64Data: a.base64Data, name: a.name })),
       paths: ready.filter((a) => a.kind === "path").map((a) => a.path),
     };
+    // While a reply runs: queue it (a card above the composer) or nudge the running reply, per Settings.
+    if (state.activeTurnId) body.ifBusy = state.defaults.busySend === "steer" ? "steer" : "queue";
     $("sendBtn").disabled = true;
     const wasDraft = state.currentId === "draft";
     if (wasDraft && state.current.title === "New chat" && text) { state.current.title = text.slice(0, 60); renderHeader(); }
@@ -1486,6 +1770,8 @@
       $("input").value = "";
       clearAttachments();
       autoGrow();
+      if (out.disposition === "queued") state.queuedBodies.set(out.turnId, { text: body.text, images: body.images, paths: body.paths });
+      else if (out.disposition === "steered") toast("Nudged: Muse sees it at its next step.");
       if (!state.activeTurnId) { state.activeTurnId = "pending"; updateRunState(); }
       if (wasDraft) {
         await loadChats();
@@ -1856,6 +2142,7 @@
     // The 5-hour and weekly bars belong to the subscription.
     $("usageBox").classList.toggle("api", via !== "subscription");
     $("usageApi").classList.toggle("hidden", via === "subscription");
+    renderSpendBox();
     if (!$("connectModal").classList.contains("hidden")) fillConnect();
   }
   /** The dialog's title, explanation, command and buttons for the current state. */
@@ -2113,6 +2400,17 @@
     if (de) de.value = [...de.options].some((o) => o.value === state.defaults.reasoningEffort) ? state.defaults.reasoningEffort : "medium";
     const da = $("defApprovalSelect");
     if (da) da.value = state.defaults.approvalMode;
+    const bs = $("busySendSelect");
+    if (bs) bs.value = state.defaults.busySend;
+    const pm = $("presetMiniswe");
+    if (pm && state.env) pm.checked = state.env.musePreset === "miniswe";
+  }
+  async function setMinisweOn(on) {
+    try {
+      const r = await api("POST", "/api/settings/preset", { miniswe: on });
+      if (state.env) state.env.musePreset = r.musePreset;
+      toast(`Muse ${r.musePreset === "miniswe" ? "will use the miniswe preset" : "will use its default preset"}${r.restartPending ? " once the current reply ends" : " from its next start"}.`);
+    } catch (e) { toast(`Could not change the preset: ${e.message}`, true); renderSettings(); }
   }
   /** The Agents mode to show for a chat: its own, else the dashboard's new-chat default. */
   function agentModeOf(c) {
@@ -2126,9 +2424,10 @@
       return {
         reasoningEffort: tiers.includes(d.reasoningEffort) ? d.reasoningEffort : "medium",
         approvalMode: d.approvalMode === "onRequest" ? "onRequest" : "allowAll",
+        busySend: d.busySend === "steer" ? "steer" : "queue", // Enter while a reply runs: queue it, or nudge the running reply
       };
     } catch {
-      return { reasoningEffort: "medium", approvalMode: "allowAll" };
+      return { reasoningEffort: "medium", approvalMode: "allowAll", busySend: "queue" };
     }
   }
   function saveDefaults() {
@@ -2248,9 +2547,11 @@
     const closeSettings = () => { $("settingsPanel").classList.add("hidden"); $("settingsBackdrop").classList.add("hidden"); };
     const openSettings = () => {
       renderSettings();
+      void loadPrices();
       $("settingsPanel").classList.remove("hidden");
       $("settingsBackdrop").classList.remove("hidden");
     };
+    $("pricesSave").addEventListener("click", savePrices);
     $("settingsBtn").addEventListener("click", (e) => {
       e.stopPropagation();
       if ($("settingsPanel").classList.contains("hidden")) openSettings(); else closeSettings();
@@ -2292,6 +2593,7 @@
       else toast(e.target.value === "allowAll" ? "New chats will approve actions automatically." : "New chats will ask before actions.");
     });
     $("restartBtn").addEventListener("click", restartDashboard);
+    $("presetMiniswe").addEventListener("change", (e) => setMinisweOn(e.target.checked));
     $("museCheckBtn").addEventListener("click", async () => {
       try { state.env.muse = await api("POST", "/api/muse/update", {}); renderMuseBadge(); renderMusePanel(); }
       catch (e) { toast(e.message, true); }
@@ -2306,6 +2608,8 @@
     $("activityPanel").classList.toggle("closed", !activityOpen);
     $("activityToggle").addEventListener("click", () => setActivityOpen(!state.activityOpen));
     $("activityClose").addEventListener("click", () => setActivityOpen(false));
+    $("cronWait").addEventListener("click", openCronMenu);
+    setInterval(tickCron, 1000);
     const realChat = () => state.current && !state.current.draft;
     $("chatTitle").addEventListener("click", () => realChat() && renameChat(state.current.id, state.current.title));
     $("folderChip").addEventListener("click", () => {
@@ -2327,6 +2631,7 @@
       const files = [...(e.clipboardData?.files || [])];
       if (files.length) { e.preventDefault(); addBrowserFiles(files.map((file) => ({ file, isDir: false }))); }
     });
+    $("busySendSelect").addEventListener("change", (e) => { state.defaults.busySend = e.target.value === "steer" ? "steer" : "queue"; saveDefaults(); updateRunState(); });
     $("sendBtn").addEventListener("click", sendMessage);
     $("stopBtn").addEventListener("click", stopTurn);
     $("compactBtn").addEventListener("click", compactCurrent);
@@ -2395,6 +2700,7 @@
     openDraft(); // blank starter chat on load; the name popup appears when the user clicks New chat
     void loadModels();
     void loadUsage();
+    void loadSpend();
     await loadChats();
     renderMuseBadge();
     // Back from Settings > Restart: reopen the chat that was open, with its unsent text.

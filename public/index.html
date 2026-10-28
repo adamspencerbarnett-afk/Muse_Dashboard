@@ -34,7 +34,11 @@
         <div id="usageBox" class="usage-box" title="Muse reports subscription usage as replies run; nothing reported yet.">
           <div class="usage-row"><span>5-hour</span><div class="usage-bar"><i id="usage5hBar"></i></div><b id="usage5h">–</b></div>
           <div class="usage-row"><span>Weekly</span><div class="usage-bar"><i id="usageWkBar"></i></div><b id="usageWk">–</b></div>
-          <div id="usageApi" class="usage-api hidden">API key · billed per use</div>
+          <div id="usageApi" class="usage-api hidden">
+            <div class="usage-api-head">API key · estimated spend</div>
+            <div class="usage-row"><span>Total</span><b id="spendTotal">–</b></div>
+            <div id="spendNote" class="usage-api-note"></div>
+          </div>
         </div>
         <button id="settingsBtn" class="settings-btn" title="Defaults and system settings (everything not already on the main page)"><span class="gear">&#9881;</span> Settings</button>
       </div>
@@ -47,6 +51,7 @@
           <h1 id="chatTitle" title="Click to rename" tabindex="0">New chat</h1>
           <button id="folderChip" class="folder-chip" title="Folder Muse works in for this chat"></button>
           <button id="trustChip" class="trust-chip hidden">⚠ Untrusted folder: no project rules or subagents · Trust…</button>
+          <span id="costChip" class="cost-chip hidden"></span>
         </div>
         <div class="header-actions">
           <span id="runState" class="run-state"></span>
@@ -69,7 +74,7 @@
             <option value="auto">Agents: Auto</option>
             <option value="parallel">Agents: Parallel</option>
           </select>
-          <button id="activityToggle" class="ghost-btn activity-toggle" title="Show or hide the Activity panel. Tool calls, edits and to-dos for this chat live there instead of in the conversation.">Activity <span id="activityCount" class="count-badge"></span></button>
+          <button id="activityToggle" class="ghost-btn activity-toggle" title="Show or hide the Activity panel. Tool calls, edits and to-dos for this chat live there instead of in the conversation.">Activity <span id="activityCount" class="count-badge"></span><span id="activityCron" class="cron-mini hidden"></span></button>
           <span id="ctxMeter" class="ctx-meter"></span>
           <button id="compactBtn" class="ghost-btn" title="Compact this chat's context now (Muse also compacts by itself near the limit)">Compact</button>
           <button id="connectBtn" class="connect-btn hidden" title="Muse Code is not ready. Click to connect it.">⚠ Connect Muse</button>
@@ -109,6 +114,17 @@
           <label for="apiKeyBtn">API key<span id="apiKeyHint" class="hint">No key saved.</span></label>
           <span class="row-btns"><button id="apiKeyRemoveBtn" class="ghost-btn hidden">Remove</button><button id="apiKeyBtn" class="ghost-btn">Add key…</button></span>
         </div>
+        <h4>Cost estimates (API plans)</h4>
+        <p class="settings-note">Meta gives no billing data, so the dashboard counts every model step's tokens per project folder and prices them itself. Muse reports Meta's catalog prices for each model (USD per 1 million tokens); they are used automatically and shown grey below. Type a number to override one, or fill in a model Meta does not price. With the box ticked (the default), the sidebar shows the API spend of all projects together, and each project folder shows what its API-key use has cost so far. These are estimates from token counts and prices; they can differ from Meta's bill. Use through the subscription is counted in tokens only, never in dollars.</p>
+        <div class="settings-row">
+          <label for="costEnabled">Show cost estimates<span id="pricesHint" class="hint"></span></label>
+          <input type="checkbox" id="costEnabled">
+        </div>
+        <div id="priceTable" class="price-table"></div>
+        <div class="settings-row">
+          <span class="hint">Models listed: the ones your connection offers now, plus any a folder has already used.</span>
+          <button id="pricesSave" class="ghost-btn">Save prices</button>
+        </div>
         <h4>Chat list</h4>
         <div class="settings-row">
           <label for="showHidden">Show hidden chats<span class="hint">Chats you hid from a chat's ⋯ menu stay out of the sidebar until you turn this on.</span></label>
@@ -138,8 +154,20 @@
             <option value="onRequest">Ask me</option>
           </select>
         </div>
+        <h4>While a reply runs</h4>
+        <div class="settings-row">
+          <label for="busySendSelect">Enter sends as<span class="hint">Queue: the message waits in a card above the composer and goes when the reply ends; from the card you can still nudge, push or recall it. Nudge: the running reply sees it at its next model step and carries on, without stopping.</span></label>
+          <select id="busySendSelect" class="hdr-select">
+            <option value="queue">Queue (goes when the reply ends)</option>
+            <option value="steer">Nudge (the running reply sees it)</option>
+          </select>
+        </div>
         <h4>System</h4>
         <div id="envInfo" class="env-info"></div>
+        <div class="settings-row">
+          <label for="presetMiniswe">Muse preset: miniswe<span class="hint">A leaner Muse (shell-centred edits, smaller fixed prompt): about 40% fewer tokens per model step at the same correctness in our tests. Works best with the memory optimizer's rollover set to about 50k (a planned setting; it becomes adjustable here when the optimizer ships). Web search is off under miniswe (the preset has no web tools). Off = Muse's default preset, with web search. Applies to the next Muse start, which happens once nothing is running.</span></label>
+          <input type="checkbox" id="presetMiniswe">
+        </div>
         <div class="settings-row">
           <label for="restartBtn">Restart dashboard<span class="hint">Restarts the dashboard and Muse and reloads this page (picks up code and config changes). Not available while a reply is running.</span></label>
           <button id="restartBtn" class="ghost-btn">Restart</button>
@@ -150,13 +178,18 @@
       <div class="workarea">
         <section id="messages" class="messages" aria-live="polite"></section>
         <aside id="activityPanel" class="activity-panel" aria-label="Activity">
-          <div class="activity-head"><span>Activity</span><button id="activityClose" class="icon-btn" title="Hide the Activity panel">×</button></div>
+          <div class="activity-head">
+            <span>Activity</span>
+            <button id="cronWait" class="cron-wait hidden" title="Scheduled jobs"><span class="cron-dot"></span><span id="cronWaitText"></span></button>
+            <button id="activityClose" class="icon-btn" title="Hide the Activity panel">×</button>
+          </div>
           <div id="activityList" class="activity-list"></div>
         </aside>
       </div>
 
       <footer id="composerWrap" class="composer-wrap">
         <div id="attachments" class="attachments"></div>
+        <div id="queueBox" class="queue-box hidden"></div>
         <div class="composer">
           <button id="attachBtn" class="icon-btn" title="Attach files">📎</button>
           <input id="fileInput" type="file" multiple hidden>

@@ -79,12 +79,61 @@ function emit(sessionId, method, params) {
 function wireSession(s, status = "idle") {
   return {
     sessionId: s.sessionId, activeTurnId: s.activeTurnId || null, createdAt: s.createdAt, updatedAt: s.updatedAt, lastActivityAt: s.updatedAt,
-    forkedFrom: null, kind: s.kind || "root", modelId: s.modelId || "mock-model", providerId: "echo", path: "", status, turnCount: s.turnCount || 0,
+    forkedFrom: null, kind: s.kind || "root", modelId: s.modelId || "mock-model", providerId: "echo", path: "", status: s.activeTurnId ? "running" : status, turnCount: s.turnCount || 0,
     workspaceRoot: s.workspaceRoot, firstUserPrompt: s.firstUserPrompt, title: s.firstUserPrompt ? s.firstUserPrompt.slice(0, 40) : undefined,
     approvalMode: { mode: s.approvalMode || "onRequest", source: "startup", lastCommandId: null },
+    queuedTurns: (s.queue || []).map((q) => ({ turnId: q.turnId, displayText: q.displayText || (q.input.find((x) => x.type === "text") || {}).text })),
   };
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---- scheduled jobs: Muse's cron tools as 1.4.13 reports them (no toolReceipt; the facts are in the output) ----
+const cronJobs = new Map(); // sessionId -> { id, cron, prompt, fires, nextFireAtMs, timer }
+function cronTool(sessionId, turnId, tool, args, output) {
+  const tid = crypto.randomUUID();
+  const item = { itemId: tid, kind: "toolCall", tool, args: JSON.stringify(args), turnId };
+  emit(sessionId, "item/started", { item: { ...item, revision: 1, status: "inProgress" } });
+  emit(sessionId, "item/completed", { item: { ...item, revision: 2, status: "completed", visibleOutput: output, recordedAt: new Date().toISOString() } });
+}
+/** "schedule check": one job that runs every MOCK_CRON_MS (1.5 s) in its own turn, three times; the third run is final (no next time). */
+function scheduleJob(sessionId, turnId) {
+  const every = Number(process.env.MOCK_CRON_MS || 1500);
+  const job = { id: crypto.randomUUID().slice(0, 8), cron: "* * * * *", prompt: "Reply with the single word PING.", fires: 0, nextFireAtMs: Date.now() + every, timer: null };
+  const old = cronJobs.get(sessionId);
+  if (old) clearTimeout(old.timer);
+  cronJobs.set(sessionId, job);
+  cronTool(sessionId, turnId, "cron_create", { cron: job.cron, prompt: job.prompt, recurring: true, fire_when_active_run: false, fire_immediately: false }, `Scheduled ${job.id} (Every minute, skips while a run is active)`);
+  const fire = () => {
+    const s = sessions[sessionId];
+    if (cronJobs.get(sessionId) !== job) return;
+    if (s.activeTurnId) { job.timer = setTimeout(fire, 100); return; } // fire_when_active_run false: wait for the turn
+    job.fires += 1;
+    const final = job.fires >= 3;
+    job.nextFireAtMs = final ? null : Date.now() + every;
+    const tId = crypto.randomUUID();
+    s.activeTurnId = tId;
+    emit(sessionId, "turn/started", { turnId: tId, commandId: tId });
+    emit(sessionId, "item/completed", { item: { itemId: crypto.randomUUID(), kind: "scheduledFire", revision: 1, status: "completed", jobId: job.id, deliveryNumber: job.fires, scheduledFireAtMs: Date.now(), ...(final ? {} : { nextFireAtMs: job.nextFireAtMs }), turnId: tId, recordedAt: new Date().toISOString() } });
+    emit(sessionId, "item/completed", { item: { itemId: crypto.randomUUID(), kind: "agentMessage", revision: 1, status: "completed", text: "PING", turnId: tId } });
+    s.activeTurnId = null;
+    s.turnCount = (s.turnCount || 0) + 1;
+    emit(sessionId, "turn/completed", { turnId: tId, terminal: "completed", usage: { inputTokens: 10, outputTokens: 1, cachedTokens: 0, reasoningTokens: 0 } });
+    if (final) cronJobs.delete(sessionId); else job.timer = setTimeout(fire, every);
+  };
+  job.timer = setTimeout(fire, every);
+}
+function listJobs(sessionId, turnId) {
+  const j = cronJobs.get(sessionId);
+  const rows = j ? [{ id: j.id, cron: j.cron, schedule: "Every minute", prompt: j.prompt, recurring: true, fire_when_active_run: false, permanent: false, next_fire_at_ms: j.nextFireAtMs, last_fired_at_ms: null, fire_count: j.fires }] : [];
+  cronTool(sessionId, turnId, "cron_list", {}, JSON.stringify({ jobs: rows }));
+}
+function cancelJob(sessionId, turnId) {
+  const j = cronJobs.get(sessionId);
+  if (!j) return cronTool(sessionId, turnId, "cron_list", {}, JSON.stringify({ jobs: [] }));
+  clearTimeout(j.timer);
+  cronJobs.delete(sessionId);
+  cronTool(sessionId, turnId, "cron_delete", { id: j.id }, `Removed scheduled job ${j.id}.`);
+}
 
 // ---- subagents and workflows ("use agents finish|linger|burn" in a prompt) ----
 // Like the real host they outlive the turn that started them: a native
@@ -181,13 +230,18 @@ async function runTurn(sessionId, turnId, input) {
       ],
     };
     const decided = new Promise((r) => approvalWaits.set(approvalId, r));
+    s.pendingApproval = approvalId; // an interrupt (or a replace) must not leave the turn stuck on it
     emit(sessionId, "approval/requested", req);
     const choice = await decided;
+    s.pendingApproval = null;
     emit(sessionId, "approval/resolved", { approvalId, itemId: tid, turnId, decision: choice === "deny" ? "denied" : "approved", policyResult: choice === "deny" ? "deny" : "allow", resolvedBy: "user", stageEvidence: [] });
     emit(sessionId, "item/completed", { item: { itemId: tid, kind: "toolCall", revision: 2, status: choice === "deny" ? "rejected" : "completed", tool: "shell", args: JSON.stringify({ command: "echo hello" }), visibleOutput: choice === "deny" ? "" : "hello\n", turnId } });
   }
   const agentsHow = (text.match(/use agents (finish|linger|burn)/i) || [])[1];
   if (agentsHow) startAgents(sessionId, turnId, agentsHow.toLowerCase());
+  if (/schedule check/i.test(text)) scheduleJob(sessionId, turnId);
+  if (/list jobs/i.test(text)) listJobs(sessionId, turnId);
+  if (/cancel job/i.test(text)) cancelJob(sessionId, turnId);
   const aid = crypto.randomUUID();
   emit(sessionId, "item/started", { item: { itemId: aid, kind: "agentMessage", revision: 1, status: "inProgress", text: "", turnId } });
   const reply = `**Mock Muse** received: _${text.replace(/[_*]/g, "") || "(no text)"}_${images.length ? `\n\nPlus ${images.length} image(s).` : ""}\n\n\`\`\`js\nconsole.log("hello from the mock");\n\`\`\`\n`;
@@ -202,6 +256,12 @@ async function runTurn(sessionId, turnId, input) {
     emit(sessionId, "item/delta", { itemId: aid, delta: chunk, field: "text" });
     await sleep(Number(process.env.MOCK_MUSE_DELAY || 30));
   }
+  if (s.steered?.length && !cancelled) { // a nudge reached the running reply: it carries on with it in mind
+    const note = `\n\nNoted: ${s.steered.join("; ")}`;
+    acc += note;
+    emit(sessionId, "item/delta", { itemId: aid, delta: note, field: "text" });
+  }
+  s.steered = [];
   emit(sessionId, "item/completed", { item: { itemId: aid, kind: "agentMessage", revision: 2, status: cancelled ? "cancelled" : "completed", text: acc, turnId } });
   s.activeTurnId = null;
   s.turnCount = (s.turnCount || 0) + 1;
@@ -210,6 +270,16 @@ async function runTurn(sessionId, turnId, input) {
   emit(sessionId, "session/tokenUsage", { turnId, modelId: s.modelId || "mock-model", promptTokens: 10, totalTokens: 15, usage: { inputTokens: 10, outputTokens: 5, cachedTokens: 0, reasoningTokens: 0 }, cumulative: { ...s.usageTotals } });
   out({ jsonrpc: "2.0", method: "usage/changed", params: { tier: "mock-tier", observedAtMs: Date.now(), window: { usedPercent: 12, resetsAtMs: Date.now() + 3600000, windowDurationMins: 300 }, weekly: { usedPercent: 3, resetsAtMs: Date.now() + 86400000 } } });
   emit(sessionId, "turn/completed", { turnId, terminal: cancelled ? "cancelled" : "completed", usage: { inputTokens: 10, outputTokens: 5, cachedTokens: 0, reasoningTokens: 0 } });
+  const next = s.queue?.shift(); // a queued message launches at the boundary (its turn/started comes from runTurn)
+  if (next) { save(); void runTurn(sessionId, next.turnId, next.input); }
+}
+/** Interrupt the running turn: break its reply loop and release an approval it may be waiting on. */
+function abortTurn(s, turnId) {
+  const id = turnId || s?.activeTurnId;
+  if (!id) return;
+  interrupted.add(id);
+  const w = s?.pendingApproval && approvalWaits.get(s.pendingApproval);
+  if (w) { approvalWaits.delete(s.pendingApproval); w("deny"); }
 }
 
 const rl = readline.createInterface({ input: process.stdin });
@@ -265,8 +335,9 @@ rl.on("line", async (line) => {
       return reply({ commandId: p.commandId, status: "accepted" });
     case "model/list": {
       const activeId = (p.sessionId && sessions[p.sessionId]?.modelId) || "mock-model";
-      const row = (modelId, label) => ({ modelId, displayLabel: label, description: null, providerId: "echo", profileId: null, isActive: modelId === activeId, isDefault: modelId === "mock-model", contextLimit: null, outputLimit: null, cost: null, releaseDate: null, defaultReasoningEffort: "high", variants: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] });
-      return reply({ models: [row("mock-model", "Mock"), row("mock-big", "Mock Big")], providerId: "echo", profileId: null, source: "fakeCatalog" });
+      // Like Meta's catalog: a cost block (decimal strings, USD per 1M tokens) on some models, null on others.
+      const row = (modelId, label, cost = null) => ({ modelId, displayLabel: label, description: null, providerId: "echo", profileId: null, isActive: modelId === activeId, isDefault: modelId === "mock-model", contextLimit: null, outputLimit: null, cost, releaseDate: null, defaultReasoningEffort: "high", variants: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] });
+      return reply({ models: [row("mock-model", "Mock", { input: "1", output: "2", cached: "0.1", currency: "USD" }), row("mock-big", "Mock Big")], providerId: "echo", profileId: null, source: "fakeCatalog" });
     }
     case "session/setModel": {
       const s = sessions[p.sessionId];
@@ -304,11 +375,38 @@ rl.on("line", async (line) => {
       };
       if (!s.firstUserPrompt) s.firstUserPrompt = (p.input.find((x) => x.type === "text") || {}).text;
       const turnId = p.commandId;
+      if (s.activeTurnId) {
+        // queue (default) waits for the reply, steer hands the input to it, replace interrupts it.
+        const how = p.ifBusy || "queue";
+        if (how === "steer") {
+          const text = (p.input.find((x) => x.type === "text") || {}).text || "";
+          emit(p.sessionId, "item/completed", { item: { itemId: crypto.randomUUID(), kind: "userMessage", revision: 1, status: "completed", text, displayText: p.displayText, steered: true, turnId: s.activeTurnId } });
+          (s.steered ||= []).push(text);
+          return reply({ commandId: p.commandId, turnId: s.activeTurnId, disposition: "steered", startedNewTurn: false, status: "accepted" });
+        }
+        if (how === "queue") {
+          (s.queue ||= []).push({ turnId, input: p.input, displayText: p.displayText });
+          save();
+          return reply({ commandId: p.commandId, turnId, disposition: "queued", startedNewTurn: false, status: "accepted" });
+        }
+        abortTurn(s);
+        reply({ commandId: p.commandId, turnId, disposition: "started", startedNewTurn: true, status: "accepted" });
+        return (async () => { while (s.activeTurnId) await sleep(20); await runTurn(p.sessionId, turnId, p.input); })();
+      }
       reply({ commandId: p.commandId, turnId, disposition: "started", startedNewTurn: true, status: "accepted" });
       return runTurn(p.sessionId, turnId, p.input);
     }
+    case "turn/unqueue": {
+      const s = sessions[p.sessionId];
+      const i = (s?.queue || []).findIndex((q) => q.turnId === p.turnId);
+      if (i < 0) return fail(-32052, "no such queued turn", "notFound");
+      s.queue.splice(i, 1);
+      save();
+      emit(p.sessionId, "turn/unqueued", { turnId: p.turnId, reason: "reclaimed" });
+      return reply({ commandId: p.commandId, turnId: p.turnId, status: "accepted" });
+    }
     case "turn/interrupt":
-      interrupted.add(p.turnId || sessions[p.sessionId]?.activeTurnId);
+      abortTurn(sessions[p.sessionId], p.turnId);
       return reply({ commandId: p.commandId, turnId: p.turnId || sessions[p.sessionId]?.activeTurnId, status: "accepted" });
     case "subagent/stop":
       if (!stopAgent(p.sessionId, (it) => it.kind === "subagent" && it.subagentId === p.subagentId, `subagent:${p.subagentId}`)) return fail(-32052, "no such subagent", "notFound");

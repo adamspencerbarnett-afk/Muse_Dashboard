@@ -282,8 +282,7 @@ details.think .body { color: #aebccb; white-space: pre-wrap; }
 .usage-box { display: flex; flex-direction: column; gap: 5px; padding: 2px 2px 4px; }
 .usage-row { display: grid; grid-template-columns: 52px 1fr 38px; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
 .usage-row b { text-align: right; font-weight: 600; color: var(--text); }
-.usage-api { font-size: 12px; color: var(--muted); }
-.usage-box.api .usage-row { display: none; }
+.usage-box.api > .usage-row { display: none; } /* the subscription bars; the API box has rows of its own */
 .row-btns { display: flex; gap: 8px; flex: none; }
 .modal-sub a { color: var(--accent); }
 /* A text field masked by CSS: browsers do not offer to save it as a password. */
@@ -299,6 +298,58 @@ input.masked { -webkit-text-security: disc; }
 .turn-summary.error { color: #fca5a5; }
 .earlier-row { text-align: center; }
 .stopped-banner.info { background: #10293a; border-color: #1f6f8b; color: #d9f3ff; }
+
+/* Scheduled jobs (Muse's cron tools): when Muse will wake the chat up next. */
+.activity-head .cron-wait { display: inline-flex; align-items: center; gap: 7px; margin: 0 8px 0 auto; padding: 3px 10px 3px 8px; border-radius: 999px; border: 1px solid rgba(34, 211, 238, .35); background: var(--accent-dim); color: var(--accent); font: inherit; font-size: 11.5px; font-weight: 600; letter-spacing: .03em; text-transform: none; cursor: pointer; font-variant-numeric: tabular-nums; max-width: 72%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.activity-head .cron-wait:hover { border-color: var(--accent); }
+.activity-head .cron-wait.due { border-color: rgba(251, 191, 36, .5); background: rgba(251, 191, 36, .12); color: var(--warn); }
+.activity-head .cron-wait.woke { border-color: rgba(52, 211, 153, .5); background: rgba(52, 211, 153, .12); color: var(--ok); }
+.cron-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 2s ease-in-out infinite; flex-shrink: 0; }
+.cron-mini { display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.cron-mini.due { color: var(--warn); }
+.chat-item .sched { position: absolute; right: 28px; bottom: 8px; font-size: 11px; font-weight: 600; line-height: 17px; padding: 0 7px; border-radius: 999px; color: var(--accent); background: var(--accent-dim); font-variant-numeric: tabular-nums; }
+.chat-item .sched.due { color: var(--warn); background: rgba(251, 191, 36, .12); }
+.chat-item.has-sched .sub { padding-right: 84px; }
+.wake { font-size: 12.5px; color: var(--accent); padding: 2px 0; font-variant-numeric: tabular-nums; }
+.cron-menu { min-width: 320px; max-width: 480px; padding: 8px; }
+.cron-menu .menu-note { font-size: 12px; color: var(--muted); padding: 4px 6px 8px; }
+.cron-menu .cron-row { display: flex; align-items: center; gap: 10px; padding: 7px 6px; border-top: 1px solid var(--border-soft); }
+.cron-menu .cron-main { flex: 1; font-size: 13px; }
+.cron-menu .cron-row button { display: inline-block; width: auto; padding: 4px 10px; border: 1px solid var(--border); border-radius: 7px; font-size: 12.5px; color: var(--muted); background: transparent; }
+.cron-menu .cron-row button:hover { color: var(--danger); border-color: rgba(248, 113, 113, .6); }
+
+/* Messages waiting for a running reply (Muse queues them): cards above the composer. */
+.queue-box { width: 100%; max-width: 1100px; display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; }
+.queue-box.hidden { display: none; }
+.queued-card { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px dashed var(--border); border-radius: 12px; padding: 8px 12px; }
+.queued-card .q-main { flex: 1; min-width: 0; }
+.queued-card .q-label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+.queued-card .q-text { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queued-card .q-btns { display: flex; gap: 6px; flex-shrink: 0; }
+.queued-card .q-btns button { padding: 4px 10px; font-size: 12.5px; }
+.msg-user.steered .bubble { border-style: dashed; }
+.msg-user.steered .role { color: var(--warn); }
+
+/* Cost estimates: the open chat's folder total (header) and the price table (Settings). */
+.cost-chip { align-self: flex-start; width: fit-content; border: 1px solid var(--border); background: var(--panel); color: var(--ok); border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; cursor: default; }
+.cost-chip.partial { color: var(--warn); }
+.price-table { display: grid; grid-template-columns: minmax(150px, 1fr) repeat(3, 108px); gap: 6px 10px; align-items: center; font-size: 13px; padding: 4px 0 8px; }
+.price-table .ph { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.price-table .pm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.price-table .pm small { display: block; color: var(--faint); font-size: 11px; }
+.price-table input { width: 100%; padding: 5px 8px; border-radius: 7px; border: 1px solid var(--border-soft); background: #0a0f16; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+.price-table input:focus { border-color: var(--accent); outline: none; }
+.price-table .empty { grid-column: 1 / -1; color: var(--muted); font-size: 12.5px; }
+
+/* API-key mode: the sidebar box shows estimated spend instead of the subscription bars. */
+.usage-api { display: flex; flex-direction: column; gap: 5px; }
+.usage-api.hidden { display: none; }
+.usage-api .usage-row { display: flex; }
+.usage-api-head { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.usage-api .usage-row span { flex: 1; font-size: 12.5px; color: var(--muted); }
+.usage-api .usage-row b { font-size: 13px; color: var(--ok); font-variant-numeric: tabular-nums; }
+.usage-api .usage-row b.partial { color: var(--warn); }
+.usage-api-note { font-size: 11px; color: var(--faint); }
 
 /* ---------- Muse connection (Connect button and dialog) ---------- */
 .connect-btn { border: 1px solid rgba(251,191,36,.55); background: rgba(251,191,36,.14); color: var(--warn); border-radius: 999px; padding: 5px 12px; font-size: 12px; font-weight: 600; white-space: nowrap; }

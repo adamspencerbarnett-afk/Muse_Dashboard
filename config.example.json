@@ -22,6 +22,8 @@
   "agentTokenWarn": 1500000,
   "agentTokenLimit": 4000000,
   "agentStallMinutes": 10,
+  "cronRunWarn": 10,
+  "musePreset": "miniswe",
   "museSettings": {
     "context_compaction.tool_result_clearing_enabled": false,
     "context_compaction.provider_context_limit_tokens": 256000,

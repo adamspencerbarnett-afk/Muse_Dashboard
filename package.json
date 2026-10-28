@@ -1,6 +1,6 @@
 {
   "name": "muse-dashboard",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "A local browser dashboard for Meta's Muse Code: chats, project folders, approvals, subagents and usage, driven through the official @muse-code/sdk.",
   "author": "Adam S. Barnett",
@@ -19,9 +19,11 @@
     "start:no-open": "node server.js --no-open",
     "install-skills": "node scripts/install-skills.mjs",
     "check": "node test/syntax.mjs",
-    "test": "npm run check && npm run test:dom-ids && npm run test:agents && npm run test:snapshot && npm run test:github && npm run test:api-key && npm run test:recycle && npm run test:usage && npm run test:connect && npm run test:skills && npm run test:sessions && npm run test:projects-sandbox && npm run test:portable && npm run test:restart && npm run test:mock",
+    "test": "npm run check && npm run test:dom-ids && npm run test:agents && npm run test:cron && npm run test:spend && npm run test:snapshot && npm run test:github && npm run test:api-key && npm run test:recycle && npm run test:usage && npm run test:connect && npm run test:skills && npm run test:sessions && npm run test:projects-sandbox && npm run test:portable && npm run test:restart && npm run test:mock",
     "test:dom-ids": "node test/dom-ids.mjs",
     "test:agents": "node test/agents.mjs",
+    "test:cron": "node test/cron.mjs",
+    "test:spend": "node test/spend.mjs",
     "test:snapshot": "node test/snapshot.mjs",
     "test:github": "node test/github.mjs",
     "test:api-key": "node test/api-key.mjs",
@@ -38,7 +40,7 @@
   },
   "dependencies": {
     "@highlightjs/cdn-assets": "11.12.0",
-    "@muse-code/sdk": "1.4.13",
+    "@muse-code/sdk": "1.4.14",
     "dompurify": "3.4.17",
     "marked": "18.1.1"
   }
