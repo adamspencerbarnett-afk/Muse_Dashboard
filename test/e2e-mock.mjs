@@ -661,6 +661,30 @@ ok(r.status === 410, "opening a deleted chat is refused (410)");
   ok((await r.json()).musePreset === "miniswe", "and can be switched back on");
 }
 
+// ---- Theme (Settings → Appearance): one saved choice for the dashboard, stamped on the page as it is served ----
+{
+  const page = async () => (await fetch(base, { headers: H })).text();
+  ok((await (await fetch(base + "api/state", { headers: H })).json()).theme === "dark", "the theme starts dark");
+  let html = await page();
+  ok(html.includes('data-theme="dark"') && html.includes('href="/vendor/hljs.css"'), "the page is served dark with the dark code colors");
+  r = await fetch(base + "api/settings/theme", { method: "POST", headers: H, body: JSON.stringify({ theme: "neon" }) });
+  ok(r.status === 400, "an unknown theme is refused: " + r.status);
+  const mark = events.length;
+  r = await fetch(base + "api/settings/theme", { method: "POST", headers: H, body: JSON.stringify({ theme: "light" }) });
+  ok(r.status === 200 && (await r.json()).theme === "light", "switching to light is accepted");
+  ok(!!(await waitAfter(mark, (e) => e.ev === "theme-changed" && e.data.theme === "light")), "open pages are told (theme-changed)");
+  html = await page();
+  ok(html.includes('data-theme="light"') && html.includes('href="/vendor/hljs-light.css"') && !html.includes('data-theme="dark"'), "the next page load is served light, with the light code colors");
+  ok((await (await fetch(base + "api/state", { headers: H })).json()).theme === "light", "state reports light");
+  r = await fetch(base + "vendor/hljs-light.css", { headers: H });
+  ok(r.status === 200 && (r.headers.get("content-type") || "").startsWith("text/css"), "the light code-highlight stylesheet is served");
+  let saved = null;
+  for (let i = 0; i < 30 && saved !== "light"; i++) { try { saved = JSON.parse(fs.readFileSync(path.join(dataDir, "index.json"), "utf8")).settings.theme; } catch { /* save in flight */ } await new Promise((res) => setTimeout(res, 50)); }
+  ok(saved === "light", "the choice is saved for the next dashboard start (index.json settings.theme)");
+  r = await fetch(base + "api/settings/theme", { method: "POST", headers: H, body: JSON.stringify({ theme: "dark" }) });
+  ok((await r.json()).theme === "dark" && (await page()).includes('data-theme="dark"'), "and back to dark");
+}
+
 ctl.abort();
 console.log(`\n${pass} passed, ${failN} failed`);
 process.exit(failN ? 1 : 0);

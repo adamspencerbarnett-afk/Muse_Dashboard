@@ -10,7 +10,7 @@ Meta's official [`@muse-code/sdk`](https://github.com/meta-models/muse-code-sdk)
 the same sign-in and the same session history as Muse in your terminal, so chats started
 in either place show up in both.
 
-![Muse Dashboard: chat list, a new chat, and the Activity panel](docs/images/dashboard.png)
+![Muse Dashboard in the light theme: chat list, a new chat, and the Activity panel](docs/images/dashboard.png)
 
 Created by **Adam S. Barnett**.
 
@@ -62,6 +62,9 @@ Created by **Adam S. Barnett**.
   chat, and the job can be cancelled from there.
 - **Muse preset switch**: the leaner `miniswe` preset is on by default (about 40% fewer tokens per
   model step in our tests); one Settings switch goes back to Muse's default preset.
+- **Dark or light theme**: Settings → Appearance switches the whole page at once. The choice is
+  saved for the dashboard, so every browser that opens it gets the same theme, and it opens in
+  that theme next time. Every text color in both themes is checked against its background.
 - **Budgets**: a notice and an automatic stop for runaway replies (model steps) and for
   subagents (input tokens).
 - **Snapshots**: before Muse works on an existing folder, save a Git snapshot and undo every
@@ -165,7 +168,7 @@ Muse can run on your **Muse Code subscription** (the Meta account sign-in, with 
 weekly allowance) or on a **Meta API key** (billed per use by Meta). Choose in
 **Settings → Connection → How Muse connects**:
 
-![Settings → Connection: the How Muse connects dropdown switches between API key (pay per use) and Muse Code subscription](docs/images/settings-connection.png)
+![Settings in the light theme: Appearance (Dark or Light), then Connection, where the How Muse connects dropdown (circled) switches between Muse Code subscription and API key (pay per use)](docs/images/settings-connection.png)
 
 - **Add an API key:** **Add key…** (or **Use an API key** in the Connect dialog). Paste a key
   from [dev.meta.ai](https://dev.meta.ai) and click **Check & save**: the dashboard asks Meta
@@ -396,7 +399,8 @@ file uploaded twice in a chat is stored once.
 - **Muse badge** (top right): the running Muse version; click for details and **Check for
   updates now**. Blue dot: just updated. Orange: update available or the check failed. Grey
   pulsing: checking. Red: problem.
-- **Settings**: the connection (status, subscription or API key, the saved key), cost estimates
+- **Settings**: the theme (Dark or Light, saved for the dashboard and applied to every open page),
+  the connection (status, subscription or API key, the saved key), cost estimates
   (the price table), show hidden chats, show chats from outside this dashboard, the starting
   effort and approvals for new chats, what Enter does while a reply runs, the **miniswe** preset
   switch (on by default: a leaner Muse with shell-centred edits and a smaller fixed prompt, about
@@ -575,7 +579,7 @@ npm test
 ```
 
 runs the syntax check of every JavaScript file and all the Windows-compatible tests: page ids,
-agents and trust rules, snapshots (real Git), GitHub clone and push guard (real Git, local
+the theme check (every stylesheet color is a theme variable set for both themes), agents and trust rules, snapshots (real Git), GitHub clone and push guard (real Git, local
 repositories), subscription usage, the Muse connection flow, the API-key connection (encrypted
 storage, key check, which key Muse gets), Delete to the Recycle Bin (including a real round trip
 through the Windows Recycle Bin, restored afterwards), skill installation, session loading, project folders and sandbox fallback, a self-contained copy

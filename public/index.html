@@ -8,13 +8,13 @@
   in; every id used there must exist here (checked by test/dom-ids.mjs).
   Scripts and styles load from the dashboard itself only (strict CSP).
 -->
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Muse Dashboard</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/vendor/hljs.css">
+  <link id="hljsTheme" rel="stylesheet" href="/vendor/hljs.css">
   <link rel="stylesheet" href="/style.css">
   <script src="/vendor/marked.js"></script>
   <script src="/vendor/purify.js"></script>
@@ -97,6 +97,14 @@
           <button id="settingsCloseBtn" class="icon-btn" title="Close settings (Esc)" aria-label="Close settings">×</button>
         </div>
         <p class="settings-sub">Only the things you can't do from the main page live here. Model, effort and approvals for the open chat are in the header bar above the conversation. Rename, hide and delete are in each chat's ⋯ menu in the sidebar, and Muse version and updates are behind the Muse badge in the header.</p>
+        <h4>Appearance</h4>
+        <div class="settings-row">
+          <label id="themeLabel">Theme<span class="hint">Saved for this dashboard: every browser that opens it uses this theme, and it opens in it next time.</span></label>
+          <div id="themeTabs" class="choice-tabs theme-tabs" role="radiogroup" aria-labelledby="themeLabel">
+            <button class="choice-tab" role="radio" data-theme-pick="dark">Dark</button>
+            <button class="choice-tab" role="radio" data-theme-pick="light">Light</button>
+          </div>
+        </div>
         <h4>Connection</h4>
         <div class="settings-row">
           <label for="connectOpenBtn">Muse Code<span id="connectInfo" class="hint">Checking…</span></label>

@@ -1590,6 +1590,8 @@
       if (d.totals !== undefined) { state.spend = d.totals; renderSpendBox(); }
     });
     es.addEventListener("prices-changed", () => { loadChatsSoon(); void loadSpend(); if (!$("settingsPanel").classList.contains("hidden")) void loadPrices(); });
+    // The theme was changed (here or in another browser): every open page follows.
+    es.addEventListener("theme-changed", (ev) => applyTheme(JSON.parse(ev.data).theme));
     // Messages waiting for a running reply: Muse admitted one, launched one, or gave one back.
     es.addEventListener("queue-changed", (ev) => {
       const d = JSON.parse(ev.data);
@@ -2404,6 +2406,27 @@
     if (bs) bs.value = state.defaults.busySend;
     const pm = $("presetMiniswe");
     if (pm && state.env) pm.checked = state.env.musePreset === "miniswe";
+    applyTheme(document.documentElement.dataset.theme);
+  }
+  /** Dark or light colors for the page. The server stamps the saved theme on the page; this follows a change without a reload. */
+  function applyTheme(theme) {
+    const t = theme === "light" ? "light" : "dark";
+    document.documentElement.dataset.theme = t;
+    const href = t === "light" ? "/vendor/hljs-light.css" : "/vendor/hljs.css";
+    if ($("hljsTheme").getAttribute("href") !== href) $("hljsTheme").setAttribute("href", href);
+    for (const b of $("themeTabs").querySelectorAll(".choice-tab")) {
+      const on = b.dataset.themePick === t;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-checked", String(on));
+    }
+  }
+  async function setTheme(theme) {
+    const before = document.documentElement.dataset.theme;
+    applyTheme(theme);
+    try {
+      const r = await api("POST", "/api/settings/theme", { theme });
+      if (state.env) state.env.theme = r.theme;
+    } catch (e) { applyTheme(before); toast(`Could not change the theme: ${e.message}`, true); }
   }
   async function setMinisweOn(on) {
     try {
@@ -2552,6 +2575,10 @@
       $("settingsBackdrop").classList.remove("hidden");
     };
     $("pricesSave").addEventListener("click", savePrices);
+    $("themeTabs").addEventListener("click", (e) => {
+      const b = e.target.closest(".choice-tab");
+      if (b && b.dataset.themePick !== document.documentElement.dataset.theme) void setTheme(b.dataset.themePick);
+    });
     $("settingsBtn").addEventListener("click", (e) => {
       e.stopPropagation();
       if ($("settingsPanel").classList.contains("hidden")) openSettings(); else closeSettings();
@@ -2689,6 +2716,7 @@
     wire();
     try {
       state.env = await api("GET", "/api/state");
+      applyTheme(state.env.theme);
       $("envInfo").textContent = `Approvals: ${state.env.approvalMode} · Sandbox: ${state.env.sandbox ? "on" : "off"}${state.env.sandboxFallback ? " (auto-fallback if unavailable)" : ""}\nProject folders: ${state.env.projectsDir}`;
       $("envInfo").title = state.env.muse.bin ? state.env.muse.bin.bin : "";
     } catch (e) {

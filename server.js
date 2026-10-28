@@ -454,7 +454,15 @@ const STATIC = {
   "/vendor/purify.js": path.join(APP_DIR, "node_modules", "dompurify", "dist", "purify.min.js"),
   "/vendor/highlight.js": path.join(APP_DIR, "node_modules", "@highlightjs", "cdn-assets", "highlight.min.js"),
   "/vendor/hljs.css": path.join(APP_DIR, "node_modules", "@highlightjs", "cdn-assets", "styles", "github-dark.min.css"),
+  "/vendor/hljs-light.css": path.join(APP_DIR, "node_modules", "@highlightjs", "cdn-assets", "styles", "github.min.css"),
 };
+// Settings → Appearance. Saved in index.json and stamped on the page as it is served (no inline script under the CSP, no dark flash).
+const THEMES = ["dark", "light"];
+const themeOf = () => (THEMES.includes(store.data.settings.theme) ? store.data.settings.theme : "dark");
+function themedPage(html) {
+  if (themeOf() === "dark") return html;
+  return Buffer.from(String(html).replace('data-theme="dark"', `data-theme="${themeOf()}"`).replace('href="/vendor/hljs.css"', 'href="/vendor/hljs-light.css"'));
+}
 const SECURITY_HEADERS = {
   "Content-Security-Policy":
     "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
@@ -892,6 +900,7 @@ async function handleApi(req, res, url) {
       trustWorkspace: !!config.trustWorkspace,
       agentMode: agentModeOf(null),
       musePreset: config.musePreset || null,
+      theme: themeOf(),
     });
   }
   if (route === "GET /muse/status") return sendJson(res, 200, museStatus());
@@ -974,6 +983,16 @@ async function handleApi(req, res, url) {
       muse.restartWhenIdle("preset");
     }
     return sendJson(res, 200, { musePreset: config.musePreset || null, restartPending: muse.busy() });
+  }
+  // Theme (Settings → Appearance): one choice for the whole dashboard; open pages follow at once.
+  if (route === "POST /settings/theme") {
+    const body = await readJsonBody(req);
+    if (!THEMES.includes(body.theme)) return sendJson(res, 400, { error: `Theme must be one of: ${THEMES.join(", ")}.` });
+    if (body.theme !== themeOf()) {
+      store.setSetting("theme", body.theme);
+      emit("theme-changed", { theme: body.theme });
+    }
+    return sendJson(res, 200, { theme: themeOf() });
   }
   // Cost estimates: the user's price table (USD per 1M tokens) and the models to price (offered now, or seen in a folder's record).
   if (route === "GET /prices") {
@@ -1455,7 +1474,7 @@ const server = http.createServer(async (req, res) => {
     const file = STATIC[url.pathname];
     if (req.method === "GET" && file) {
       const body = await fsp.readFile(file);
-      return send(res, 200, body, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream" });
+      return send(res, 200, url.pathname === "/" ? themedPage(body) : body, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream" });
     }
     return send(res, 404, "Not found.");
   } catch (e) {
